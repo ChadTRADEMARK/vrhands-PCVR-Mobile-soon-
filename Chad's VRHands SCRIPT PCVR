@@ -40,6 +40,12 @@ return C
 
 local C = ((loadstring or load)(SHIM))()
 
+-- ====================== UPDATE LINK ======================
+-- Put the RAW link to this script here (GitHub raw, Pastebin raw, your own host...).
+-- The Update button in the Start Menu downloads this link and restarts the script.
+local UPDATE_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR-Mobile-soon-/refs/heads/main/Chad's%20VRHands%20SCRIPT%20PCVR"
+-- ==========================================================
+
 do
     -- The only hard requirement is SOME way to hook the game's metatable.
     -- Everything else degrades gracefully (see notes in the report).
@@ -74,6 +80,8 @@ local TeleportService = game:GetService("TeleportService")
 
 -- the queued script runs in a fresh environment, so it carries its own copy of the layer
 local PRELUDE = "local C = (function()\n" .. SHIM .. "\nend)()\n"
+    .. "local EXEC = C\n"
+    .. "local UPDATE_URL = " .. string.format("%q", UPDATE_URL) .. "\n"
 
 local hrs = PRELUDE .. [==[
 local VRService   = game:GetService("VRService")
@@ -2742,6 +2750,81 @@ task.spawn(function()
             task.delay(0.5, function() g:Destroy() end)
         end
 
+        -- ============ UPDATER ============
+        -- Downloads the newest copy of the script from UPDATE_URL and runs it.
+        -- The new copy rejoins the game the same way a normal launch does.
+        local function fetchSource(url)
+            local sep = string.find(url, "?", 1, true) and "&" or "?"
+            local full = url .. sep .. "nocache=" .. tostring(os.time())   -- skip cached copies
+            local ok, res = pcall(function() return game:HttpGet(full, true) end)
+            if ok and type(res) == "string" and #res > 0 then return res end
+            local req = (syn and syn.request) or http_request or request or (fluxus and fluxus.request)
+            if req then
+                local ok2, r = pcall(req, { Url = full, Method = "GET", Headers = { ["Cache-Control"] = "no-cache" } })
+                if ok2 and r and (r.Success or r.StatusCode == 200) and type(r.Body) == "string" and #r.Body > 0 then
+                    return r.Body
+                end
+            end
+            return nil
+        end
+
+        -- only used when the executor can't carry the script across a rejoin
+        local function cleanupAll()
+            for _, n in ipairs({ "NoVR_HeadVis", "NoVR_Control", "NoVR_Crosshair", "NoVR_CamHead", "NoVR_CamView" }) do
+                pcall(function() RunService:UnbindFromRenderStep(n) end)
+            end
+            local pg = lp:FindFirstChild("PlayerGui")
+            if pg then
+                for _, n in ipairs({ "NoVR_Mobile", "NoVR_MobileToggle", "NoVR_HUD", "NoVR_StartToggle", "NoVR_Start", "NoVR_Crosshair" }) do
+                    local o = pg:FindFirstChild(n)
+                    if o then o:Destroy() end
+                end
+            end
+            local b = Lighting:FindFirstChild("NoVR_Blur")
+            if b then b:Destroy() end
+            local h = workspace:FindFirstChild("NoVR_LocalHead")
+            if h then h:Destroy() end
+            UIS.MouseBehavior = Enum.MouseBehavior.Default
+            UIS.MouseIconEnabled = true
+        end
+
+        local updating = false
+        local function performUpdate(setStatus)
+            if updating then return end
+            if type(UPDATE_URL) ~= "string" or UPDATE_URL == "" or string.find(UPDATE_URL, "PUT_YOUR", 1, true) then
+                setStatus("Set UPDATE_URL at the top of the script first.", true)
+                return
+            end
+            updating = true
+            setStatus("Downloading the latest version...", false)
+            local src = fetchSource(UPDATE_URL)
+            if not src then
+                updating = false
+                setStatus("Download failed - check the link / HttpGet.", true)
+                return
+            end
+            local fn, err = (EXEC.loadstring or loadstring or load)(src)
+            if not fn then
+                updating = false
+                setStatus("New version has an error: " .. tostring(err):sub(1, 60), true)
+                return
+            end
+            if EXEC.queue then
+                setStatus("Updated! Restarting...", false)
+                task.wait(0.4)
+            else
+                setStatus("Updated! Restarting (no rejoin on this executor)...", false)
+                task.wait(0.4)
+                cleanupAll()
+            end
+            local ok, e = pcall(fn)
+            if not ok then
+                updating = false
+                warn("[NoVR] update failed to start: " .. tostring(e))
+            end
+        end
+        -- ==================================
+
         local function openStart()
             if startGui then return end
             S.menuOpen = true
@@ -2971,7 +3054,7 @@ task.spawn(function()
 
             local main = makePanel(0, 0, MAINW, PH, "Panel", 0)
             local dock = makePanel(135, PH + 22, 560, 62, "Dock", 0.2)
-            local side = makePanel(MAINW + 14, 100, 246, 232, "Side", 0.12)
+            local side = makePanel(MAINW + 14, 100, 246, 300, "Side", 0.12)
 
             -- ===== OVERLAY PANELS: Controls (PC + Mobile) and Settings (colour + size) =====
             local CONTROLS = {
@@ -4282,6 +4365,41 @@ task.spawn(function()
                 conns[2] = UIS.InputEnded:Connect(function(io) if io == input then stop() end end)
                 conns[3] = input.Changed:Connect(function()
                     if input.UserInputState == Enum.UserInputState.End or input.UserInputState == Enum.UserInputState.Cancel then stop() end
+                end)
+            end)
+
+            -- ===== update button =====
+            local upd = Instance.new("TextButton")
+            upd.Position = UDim2.fromOffset(14, 232)
+            upd.Size = UDim2.fromOffset(218, 38)
+            upd.AutoButtonColor = false
+            upd.BackgroundColor3 = Color3.new(1, 1, 1)
+            upd.BorderSizePixel = 0
+            upd.Text = "UPDATE & RESTART"
+            upd.Font = Enum.Font.GothamBlack
+            upd.TextSize = 13
+            upd.TextColor3 = WHITE
+            upd.Parent = side
+            corner(upd, 10)
+            grad(upd, PINK, VIOLET, 0)
+            stroke(upd, Color3.new(1, 1, 1), 1.5, 0.2)
+            local usc = Instance.new("UIScale")
+            usc.Parent = upd
+            local ustat = lbl(side, "", 14, 274, 218, 16, 10, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+            ustat.TextTruncate = Enum.TextTruncate.None
+            ustat.TextWrapped = true
+            ustat.Size = UDim2.fromOffset(218, 22)
+            upd.MouseEnter:Connect(function() tw(usc, 0.4, { Scale = 1.04 }, Enum.EasingStyle.Back) end)
+            upd.MouseLeave:Connect(function() tw(usc, 0.4, { Scale = 1 }, Enum.EasingStyle.Back) end)
+            upd.InputBegan:Connect(function(io) if isPress(io) then tw(usc, 0.1, { Scale = 0.95 }); ripple(upd, io, fit.Scale) end end)
+            upd.InputEnded:Connect(function(io) if isPress(io) then tw(usc, 0.4, { Scale = 1 }, Enum.EasingStyle.Back) end end)
+            upd.Activated:Connect(function()
+                task.spawn(performUpdate, function(msg, isErr)
+                    if ustat.Parent then
+                        ustat.Text = msg
+                        ustat.TextColor3 = isErr and C(255, 130, 140) or GREEN
+                        ustat:SetAttribute("tc", true)
+                    end
                 end)
             end)
 
