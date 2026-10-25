@@ -2775,13 +2775,15 @@ task.spawn(function()
             end
             local pg = lp:FindFirstChild("PlayerGui")
             if pg then
-                for _, n in ipairs({ "NoVR_Mobile", "NoVR_MobileToggle", "NoVR_HUD", "NoVR_StartToggle", "NoVR_Start", "NoVR_Crosshair" }) do
+                for _, n in ipairs({ "NoVR_Mobile", "NoVR_MobileToggle", "NoVR_HUD", "NoVR_StartToggle", "NoVR_Start", "NoVR_Crosshair", "NoVR_Loader" }) do
                     local o = pg:FindFirstChild(n)
                     if o then o:Destroy() end
                 end
             end
             local b = Lighting:FindFirstChild("NoVR_Blur")
             if b then b:Destroy() end
+            local lb = Lighting:FindFirstChild("NoVR_LoadBlur")
+            if lb then lb:Destroy() end
             local h = workspace:FindFirstChild("NoVR_LocalHead")
             if h then h:Destroy() end
             UIS.MouseBehavior = Enum.MouseBehavior.Default
@@ -4466,6 +4468,268 @@ task.spawn(function()
             Theme.recolor(g)
         end
 
+        -- ============ LOADING SCREEN (animated 3D "M" logo) ============
+        -- Shows before the Start Menu. The M is built from plain frames: a stack of
+        -- darker copies behind the front face makes the extrusion, and the stack
+        -- sways every frame so it reads as a spinning 3D letter.
+        local loaderActive = false
+        local rawOpenStart = openStart
+        openStart = function()
+            if loaderActive then return end
+            rawOpenStart()
+        end
+
+        local function showLoader()
+            loaderActive = true
+            S.menuOpen = true
+            setLook(false)
+
+            local old = Lighting:FindFirstChild("NoVR_LoadBlur")
+            if old then old:Destroy() end
+            local lblur = Instance.new("BlurEffect")
+            lblur.Name = "NoVR_LoadBlur"
+            lblur.Size = 0
+            lblur.Parent = Lighting
+            tw(lblur, 0.6, { Size = 30 }, Enum.EasingStyle.Sine)
+
+            local g = Instance.new("ScreenGui")
+            g.Name = "NoVR_Loader"
+            g.ResetOnSpawn = false
+            g.IgnoreGuiInset = true
+            g.DisplayOrder = 200
+            g.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+            g.Parent = lp:WaitForChild("PlayerGui")
+
+            local back = Instance.new("Frame")   -- dark backdrop, also swallows clicks
+            back.Size = UDim2.fromScale(1, 1)
+            back.BackgroundColor3 = Color3.new(1, 1, 1)
+            back.BackgroundTransparency = 1
+            back.BorderSizePixel = 0
+            back.Active = true
+            back.Parent = g
+            grad(back, C(46, 20, 112), C(8, 5, 28), 60)
+            tw(back, 0.5, { BackgroundTransparency = 0.04 })
+
+            local stage = Instance.new("Frame")
+            stage.AnchorPoint = Vector2.new(0.5, 0.5)
+            stage.Position = UDim2.fromScale(0.5, 0.5)
+            stage.Size = UDim2.fromOffset(520, 470)
+            stage.BackgroundTransparency = 1
+            stage.Parent = g
+            local fitS = Instance.new("UIScale")
+            fitS.Parent = stage
+            local function refit()
+                local v = cam.ViewportSize
+                fitS.Scale = math.clamp(math.min(v.X / 560, v.Y / 500), 0.5, 1.5)
+            end
+            refit()
+
+            -- glow behind the logo
+            local glow = softBox(stage, 160, 105, 200, 170, PINK, 70, 14, 0.9, 40)
+            local glowSc = Instance.new("UIScale")
+            glowSc.Parent = glow
+            task.delay(0.2, function() if g.Parent then softFade(glow, true, 1.2) end end)
+
+            -- ground shadow
+            local shadowF = Instance.new("Frame")
+            shadowF.AnchorPoint = Vector2.new(0.5, 0.5)
+            shadowF.Position = UDim2.fromOffset(260, 322)
+            shadowF.Size = UDim2.fromOffset(150, 16)
+            shadowF.BackgroundColor3 = C(4, 0, 22)
+            shadowF.BackgroundTransparency = 1
+            shadowF.BorderSizePixel = 0
+            shadowF.Parent = stage
+            corner(shadowF, 8)
+            tw(shadowF, 1.0, { BackgroundTransparency = 0.55 }, Enum.EasingStyle.Sine)
+
+            -- ===== the M =====
+            local W, H, T = 150, 130, 34
+            local NL = 18                                  -- depth layers
+            local CW, CH = W + 90, H + 90                  -- canvas around the letter
+            local cx0, cy0 = CW / 2, CH / 2
+
+            local mHold = Instance.new("CanvasGroup")
+            mHold.AnchorPoint = Vector2.new(0.5, 0.5)
+            mHold.Position = UDim2.fromOffset(260, 190)
+            mHold.Size = UDim2.fromOffset(CW, CH)
+            mHold.BackgroundTransparency = 1
+            mHold.BorderSizePixel = 0
+            mHold.GroupTransparency = 1
+            mHold.Parent = stage
+            local mScale = Instance.new("UIScale")
+            mScale.Scale = 0.6
+            mScale.Parent = mHold
+
+            local function makeHolder(z)
+                local h = Instance.new("Frame")
+                h.AnchorPoint = Vector2.new(0.5, 0.5)
+                h.Position = UDim2.fromOffset(cx0, cy0)
+                h.Size = UDim2.fromOffset(W, H)
+                h.BackgroundTransparency = 1
+                h.ZIndex = z
+                h.Parent = mHold
+                return h
+            end
+            -- four bars: left, right, and the two diagonals that meet in the middle
+            local function makePieces(parent, col)
+                local list = {}
+                local function piece(x, y, w, h, rot)
+                    local f = Instance.new("Frame")
+                    f.AnchorPoint = Vector2.new(0.5, 0.5)
+                    f.Position = UDim2.fromOffset(x, y)
+                    f.Size = UDim2.fromOffset(w, h)
+                    f.Rotation = rot
+                    f.BackgroundColor3 = col
+                    f.BorderSizePixel = 0
+                    f.Parent = parent
+                    corner(f, 8)
+                    list[#list + 1] = f
+                end
+                piece(T / 2, H / 2, T, H, 0)
+                piece(W - T / 2, H / 2, T, H, 0)
+                local sx, sy = T / 2 + 3, T * 0.55
+                local ex, ey = W / 2, H * 0.68
+                local dx, dy = ex - sx, ey - sy
+                local len = math.sqrt(dx * dx + dy * dy) + T * 0.5
+                local ang = math.deg(math.atan2(dy, dx))
+                piece((sx + ex) / 2, (sy + ey) / 2, len, T, ang)
+                piece(W - (sx + ex) / 2, (sy + ey) / 2, len, T, -ang)
+                return list
+            end
+
+            -- depth layers, back (dark) to front
+            local layers = {}
+            for k = NL, 1, -1 do
+                local a = k / NL
+                local h = makeHolder(NL + 1 - k)
+                makePieces(h, C(104, 58, 224):Lerp(C(12, 7, 40), a))
+                layers[k] = h
+            end
+            -- front face with a light-to-deep violet gradient
+            local front = makeHolder(NL + 2)
+            for _, f in ipairs(makePieces(front, Color3.new(1, 1, 1))) do
+                local gr = Instance.new("UIGradient")
+                gr.Color = ColorSequence.new(C(232, 200, 255), C(118, 84, 246))
+                gr.Rotation = 90 - f.Rotation
+                gr.Parent = f
+            end
+            -- shine: a bright band that sweeps across the front face
+            local shine = makeHolder(NL + 3)
+            local shineGr = {}
+            for _, f in ipairs(makePieces(shine, Color3.new(1, 1, 1))) do
+                local gr = Instance.new("UIGradient")
+                gr.Transparency = NumberSequence.new({
+                    NumberSequenceKeypoint.new(0, 1),
+                    NumberSequenceKeypoint.new(0.38, 1),
+                    NumberSequenceKeypoint.new(0.5, 0.25),
+                    NumberSequenceKeypoint.new(0.62, 1),
+                    NumberSequenceKeypoint.new(1, 1),
+                })
+                gr.Rotation = 45 - f.Rotation
+                gr.Offset = Vector2.new(-1, 0)
+                gr.Parent = f
+                shineGr[#shineGr + 1] = gr
+            end
+
+            -- ===== texts + loading bar =====
+            local texts = {}
+            local title = lbl(stage, "V R   H A N D S", 0, 340, 520, 36, 28, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+            grad(title, C(255, 255, 255), C(190, 150, 255), 0)
+            local sub = lbl(stage, "No-VR  |  Edited by @N4THAFTER", 0, 376, 520, 18, 12, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+            local status = lbl(stage, "Starting up...", 0, 432, 520, 16, 11, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+            local pct = lbl(stage, "0%", 396, 400, 60, 16, 11, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Left)
+            for _, t in ipairs({ title, sub, status, pct }) do
+                t.TextTransparency = 1
+                texts[#texts + 1] = t
+            end
+
+            local track = Instance.new("Frame")
+            track.Position = UDim2.fromOffset(130, 405)
+            track.Size = UDim2.fromOffset(260, 6)
+            track.BackgroundColor3 = Color3.new(1, 1, 1)
+            track.BackgroundTransparency = 1
+            track.BorderSizePixel = 0
+            track.Parent = stage
+            corner(track, 3)
+            local fill = Instance.new("Frame")
+            fill.Size = UDim2.new(0, 0, 1, 0)
+            fill.BackgroundColor3 = Color3.new(1, 1, 1)
+            fill.BackgroundTransparency = 1
+            fill.BorderSizePixel = 0
+            fill.Parent = track
+            corner(fill, 3)
+            grad(fill, PINK, VIOLET, 0)
+
+            -- entrance
+            tw(mHold, 0.9, { GroupTransparency = 0 }, Enum.EasingStyle.Quint)
+            tw(mScale, 1.0, { Scale = 1 }, Enum.EasingStyle.Back)
+            tw(track, 0.6, { BackgroundTransparency = 0.82 })
+            tw(fill, 0.6, { BackgroundTransparency = 0 })
+            for i, t in ipairs(texts) do
+                task.delay(0.35 + i * 0.1, function()
+                    if t.Parent then tw(t, 0.6, { TextTransparency = 0 }) end
+                end)
+            end
+
+            -- per-frame motion: extrusion sway, bob, glow pulse, shine sweep
+            local t0 = os.clock()
+            local conn
+            conn = RunService.Heartbeat:Connect(function()
+                local tt = os.clock() - t0
+                refit()
+                local x = math.clamp((tt - 0.15) / 1.2, 0, 1)
+                local depthK = 1 - (1 - x) ^ 3
+                local ox = math.sin(tt * 1.3) * 1.7
+                local oy = 1.15 + math.cos(tt * 1.05) * 0.4
+                for k = 1, NL do
+                    layers[k].Position = UDim2.fromOffset(cx0 + ox * k * depthK, cy0 + oy * k * depthK)
+                end
+                mHold.Position = UDim2.fromOffset(260, 190 + math.sin(tt * 2.0) * 5)
+                mHold.Rotation = math.sin(tt * 1.1) * 2.5
+                glowSc.Scale = 1 + 0.07 * math.sin(tt * 2.4)
+                shadowF.Size = UDim2.fromOffset(150 + 10 * math.sin(tt * 2.0 + math.pi), 16)
+
+                local phase = (tt % 3.2) / 3.2
+                local off = -1 + 2 * math.clamp(phase / 0.45, 0, 1)
+                for _, gr in ipairs(shineGr) do gr.Offset = Vector2.new(off, 0) end
+
+                pct.Text = math.floor(fill.Size.X.Scale * 100 + 0.5) .. "%"
+            end)
+
+            -- loading steps
+            task.spawn(function()
+                local function step(p, txt, wait)
+                    status.Text = txt
+                    tw(fill, 0.55, { Size = UDim2.new(p, 0, 1, 0) }, Enum.EasingStyle.Sine)
+                    task.wait(wait)
+                end
+                task.wait(0.5)
+                step(0.2,  "Initializing...", 0.6)
+                step(0.45, "Hooking VR input...", 0.7)
+                step(0.7,  Input and "Hands ready" or "Hands ready (no gestures)", 0.7)
+                step(0.92, "Building menu...", 0.6)
+                step(1,    "Ready!", 0.5)
+
+                -- exit: the M grows and fades, then the Start Menu opens
+                tw(mScale, 0.55, { Scale = 1.4 }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+                tw(mHold, 0.55, { GroupTransparency = 1 }, Enum.EasingStyle.Sine)
+                softFade(glow, false, 0.5)
+                tw(shadowF, 0.4, { BackgroundTransparency = 1 })
+                for _, t in ipairs(texts) do tw(t, 0.4, { TextTransparency = 1 }) end
+                tw(track, 0.4, { BackgroundTransparency = 1 })
+                tw(fill, 0.4, { BackgroundTransparency = 1 })
+                tw(back, 0.6, { BackgroundTransparency = 1 }, Enum.EasingStyle.Sine)
+                tw(lblur, 0.6, { Size = 0 }, Enum.EasingStyle.Sine)
+                task.wait(0.65)
+                conn:Disconnect()
+                g:Destroy()
+                lblur:Destroy()
+                loaderActive = false
+                rawOpenStart()
+            end)
+        end
+        -- ================================================================
+
         hudApi.openStart = openStart
         hudApi.closeStart = closeStart
 
@@ -4516,7 +4780,7 @@ task.spawn(function()
             end
         end)
 
-        openStart()   -- opening screen
+        showLoader()   -- loading screen, then the start menu opens
     end
 
     print("[NoVR] control active.")
