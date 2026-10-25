@@ -169,9 +169,8 @@ do
                 if m == "GetUserCFrameEnabled" then return true end
                 if m == "GetUserCFrame" then
                     local which = ...
-                    if which == Enum.UserCFrame.Head and TP.D ~= 0 then
-                        return CFrame.new(0, 0, -TP.D / math.max(TP.scale, 0.001))
-                    end
+                    -- third person no longer offsets the head: the game always
+                    -- sees the camera sitting exactly on your head
                     return identity
                 end
             end
@@ -309,7 +308,7 @@ task.spawn(function()
             scale = resolveScale(scale)
             -- the head (and the hands, so they stay attached to it) sit
             -- curD studs in front of the camera. curD is 0 in first person.
-            local headOff = CFrame.new(0, 0, -S.curD)
+            local headOff = CFrame.identity   -- head never leaves the camera as far as the game knows
             if uc == Enum.UserCFrame.LeftHand then
                 local c = CFrame.new(-S.spread + S.handLX, S.height + S.handLY, -S.reachL)
                 local r = CFrame.fromEulerAnglesYXZ(S.aimLPitch, S.aimLYaw, 0)
@@ -397,6 +396,7 @@ task.spawn(function()
     -- behind it; in first person they are the same point.
     local camPos = cam.CFrame.Position
     local headCF = cam.CFrame   -- where your head should be (camPos + your look direction)
+    local camBack = cam.CFrame  -- where the screen is drawn from (head pulled back in 3rd person)
     local keys = {}
     local mouseDown = { L = false, R = false }
 
@@ -1020,9 +1020,12 @@ task.spawn(function()
         TP.scale = resolveScale()
 
         cam.CameraType = Enum.CameraType.Scriptable
-        -- camera = head position pulled straight back along the view direction.
-        -- The head itself (camPos) never moves when you zoom.
-        cam.CFrame = CFrame.new(camPos - rot.LookVector * D) * rot
+        -- The game positions your real (replicated) head from the camera, so the
+        -- camera stays ON the head while the game runs. It is only pulled back
+        -- right before the frame is drawn (see NoVR_CamView below), so other
+        -- players never see your head follow the third-person camera.
+        camBack = CFrame.new(camPos - rot.LookVector * D) * rot
+        cam.CFrame = headCF
 
         if Input then
             Input.directionLateral  = Vector2.zero
@@ -1039,6 +1042,16 @@ task.spawn(function()
                 if Input.rFist == 1 then Input.rIndex = 1 end
             end
         end
+    end)
+
+    -- camera sits on the head at the start of every frame (what the game reads)...
+    RunService:BindToRenderStep("NoVR_CamHead", Enum.RenderPriority.First.Value, function()
+        cam.CFrame = headCF
+    end)
+    -- ...and is moved back to the third-person view after everything else ran,
+    -- so only YOUR screen sees it there.
+    RunService:BindToRenderStep("NoVR_CamView", Enum.RenderPriority.Last.Value + 10000, function()
+        cam.CFrame = camBack
     end)
 
     -- ============ CROSSHAIR (shows where a held gun points) ============
@@ -3026,7 +3039,7 @@ task.spawn(function()
             -- generic overlay: panel + title + close button. Calling it again
             -- while it is open closes it (toggle).
             local function overlay(slot, x, y, w, h, name, title)
-                for _, other in ipairs({ "controls", "settings", "crosshair", "teleport" }) do
+                for _, other in ipairs({ "controls", "settings", "crosshair", "teleport", "profile" }) do
                     if other ~= slot and me[other] and not me[other].closed then
                         me[other].close(); me[other] = nil
                     end
@@ -3537,6 +3550,228 @@ task.spawn(function()
                 Theme.recolor(p)
             end
 
+            -- ---------- PROFILE panel (your Roblox profile info) ----------
+            local function openProfile()
+                local p = overlay("profile", 75, 20, 430, 400, "Profile", "My Roblox profile")
+                if not p then return end
+
+                local av = Instance.new("ImageLabel")
+                av.Position = UDim2.fromOffset(20, 56)
+                av.Size = UDim2.fromOffset(72, 72)
+                av.BackgroundColor3 = C(40, 20, 100)
+                av.BorderSizePixel = 0
+                av.ZIndex = 3
+                av.Parent = p
+                corner(av, 36)
+                stroke(av, PINK, 2, 0.1)
+                local avInit = lbl(av, string.upper(string.sub(lp.DisplayName, 1, 1)), 0, 0, 72, 72, 26, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+                avInit.Size = UDim2.fromScale(1, 1)
+                task.spawn(function()
+                    local ok, img = pcall(function()
+                        return Players:GetUserThumbnailAsync(lp.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150)
+                    end)
+                    if ok and img and av.Parent then
+                        av.Image = img
+                        avInit.Visible = false
+                    end
+                end)
+
+                lbl(p, lp.DisplayName, 106, 58, 310, 24, 17)
+                lbl(p, "@" .. lp.Name, 106, 82, 310, 16, 11, MUTED)
+
+                -- copy buttons (only when the executor has a clipboard function)
+                local clip = setclipboard or toclipboard
+                if clip then
+                    local function copyBtn(text, x, value)
+                        local b = Instance.new("TextButton")
+                        b.Position = UDim2.fromOffset(x, 104)
+                        b.Size = UDim2.fromOffset(98, 24)
+                        b.AutoButtonColor = false
+                        b.BackgroundColor3 = PINK
+                        b.BackgroundTransparency = 0.4
+                        b.BorderSizePixel = 0
+                        b.Text = text
+                        b.Font = Enum.Font.GothamBold
+                        b.TextSize = 10
+                        b.TextColor3 = WHITE
+                        b.ZIndex = 5
+                        b.Parent = p
+                        corner(b, 8)
+                        b.InputBegan:Connect(function(io) if isPress(io) then ripple(b, io, fit.Scale) end end)
+                        b.Activated:Connect(function()
+                            pcall(clip, value)
+                            b.Text = "COPIED!"
+                            task.delay(1, function() if b.Parent then b.Text = text end end)
+                        end)
+                    end
+                    copyBtn("COPY USER ID", 106, tostring(lp.UserId))
+                    copyBtn("COPY LINK", 212, "https://www.roblox.com/users/" .. lp.UserId .. "/profile")
+                end
+
+                local sc = Instance.new("ScrollingFrame")
+                sc.Position = UDim2.fromOffset(16, 142)
+                sc.Size = UDim2.fromOffset(398, 246)
+                sc.BackgroundTransparency = 1
+                sc.BorderSizePixel = 0
+                sc.ScrollBarThickness = 4
+                sc.CanvasSize = UDim2.new()
+                sc.AutomaticCanvasSize = Enum.AutomaticSize.Y
+                sc.ScrollingDirection = Enum.ScrollingDirection.Y
+                sc.Parent = p
+                local ll = Instance.new("UIListLayout")
+                ll.Padding = UDim.new(0, 4)
+                ll.SortOrder = Enum.SortOrder.LayoutOrder
+                ll.Parent = sc
+
+                local rowN = 0
+                local function section(title)
+                    rowN += 1
+                    local f = Instance.new("Frame")
+                    f.LayoutOrder = rowN
+                    f.Size = UDim2.new(1, -8, 0, 22)
+                    f.BackgroundTransparency = 1
+                    f.Parent = sc
+                    lbl(f, title, 4, 4, 300, 16, 11, MUTED)
+                end
+                local function info(label, value)
+                    rowN += 1
+                    local f = Instance.new("Frame")
+                    f.LayoutOrder = rowN
+                    f.Size = UDim2.new(1, -8, 0, 30)
+                    f.BackgroundColor3 = Color3.new(1, 1, 1)
+                    f.BackgroundTransparency = 0.86
+                    f.BorderSizePixel = 0
+                    f.Parent = sc
+                    corner(f, 8)
+                    lbl(f, label, 10, 0, 130, 30, 12, WHITE)
+                    return lbl(f, tostring(value), 140, 0, 244, 30, 12, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Right)
+                end
+
+                -- account
+                local days = lp.AccountAge
+                local years = days >= 365 and string.format("%.1f years", days / 365) or (days .. " days")
+                local created = os.date("!%b %d, %Y", os.time() - days * 86400)
+                local premium = "No"
+                pcall(function() if lp.MembershipType == Enum.MembershipType.Premium then premium = "Yes" end end)
+                local verified = "No"
+                pcall(function() if lp.HasVerifiedBadge then verified = "Yes" end end)
+
+                section("ACCOUNT")
+                info("Display name", lp.DisplayName)
+                info("Username", lp.Name)
+                info("User ID", lp.UserId)
+                info("Account age", days .. " days  (" .. years .. ")")
+                info("Joined (approx.)", created)
+                info("Premium", premium)
+                info("Verified badge", verified)
+                local friendsL = info("Friends", "loading...")
+                task.spawn(function()
+                    local ok, n = pcall(function()
+                        local pages = Players:GetFriendsAsync(lp.UserId)
+                        local count = 0
+                        while true do
+                            count += #pages:GetCurrentPage()
+                            if pages.IsFinished then break end
+                            pages:AdvanceToNextPageAsync()
+                        end
+                        return count
+                    end)
+                    if friendsL.Parent then friendsL.Text = ok and tostring(n) or "unavailable" end
+                end)
+                local team = lp.Team and lp.Team.Name or "None"
+                info("Team", team)
+
+                -- ===== WEB PROFILE (needs the executor's request function) =====
+                section("WEB PROFILE")
+                local createdL   = info("Created", "loading...")
+                local followersL = info("Followers", "loading...")
+                local followingL = info("Following", "loading...")
+                local descL      = info("About", "loading...")
+
+                task.spawn(function()
+                    local HttpService = game:GetService("HttpService")
+                    local req = (syn and syn.request) or http_request or request or (fluxus and fluxus.request)
+
+                    if not req then
+                        for _, l in ipairs({ createdL, followersL, followingL, descL }) do
+                            if l.Parent then l.Text = "needs request()" end
+                        end
+                        return
+                    end
+
+                    local function getJson(url)
+                        local ok, res = pcall(req, { Url = url, Method = "GET" })
+                        if not ok or not res then return nil end
+                        if not (res.Success or res.StatusCode == 200) then return nil end
+                        local ok2, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
+                        return ok2 and data or nil
+                    end
+
+                    local MONTHS = { "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec" }
+                    local function commas(n)
+                        local s = tostring(n)
+                        while true do
+                            local r, k = s:gsub("^(-?%d+)(%d%d%d)", "%1,%2")
+                            s = r
+                            if k == 0 then break end
+                        end
+                        return s
+                    end
+
+                    local base = tostring(lp.UserId)
+
+                    -- created date + description
+                    local u = getJson("https://users.roblox.com/v1/users/" .. base)
+                    if u then
+                        if createdL.Parent then
+                            local y, m, d = tostring(u.created or ""):match("(%d+)-(%d+)-(%d+)")
+                            createdL.Text = y and (MONTHS[tonumber(m)] .. " " .. tonumber(d) .. ", " .. y) or "unknown"
+                        end
+                        if descL.Parent then
+                            local desc = tostring(u.description or ""):gsub("%s+", " ")
+                            descL.Text = desc ~= "" and desc or "(none)"
+                        end
+                    else
+                        if createdL.Parent then createdL.Text = "unavailable" end
+                        if descL.Parent then descL.Text = "unavailable" end
+                    end
+
+                    -- followers / following
+                    local f1 = getJson("https://friends.roblox.com/v1/users/" .. base .. "/followers/count")
+                    if followersL.Parent then followersL.Text = f1 and commas(f1.count) or "unavailable" end
+                    local f2 = getJson("https://friends.roblox.com/v1/users/" .. base .. "/followings/count")
+                    if followingL.Parent then followingL.Text = f2 and commas(f2.count) or "unavailable" end
+                end)
+
+                -- device
+                local dev = {}
+                if UIS.TouchEnabled then dev[#dev + 1] = "Touch" end
+                if UIS.KeyboardEnabled then dev[#dev + 1] = "Keyboard" end
+                if UIS.MouseEnabled then dev[#dev + 1] = "Mouse" end
+                if UIS.GamepadEnabled then dev[#dev + 1] = "Gamepad" end
+                local locale = "unknown"
+                pcall(function() locale = game:GetService("LocalizationService").RobloxLocaleId end)
+                section("DEVICE")
+                info("Input", #dev > 0 and table.concat(dev, ", ") or "unknown")
+                info("Language", locale)
+
+                -- current game
+                local gameL = info("Game", "loading...")
+                task.spawn(function()
+                    local ok, gi = pcall(function()
+                        return game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId)
+                    end)
+                    if gameL.Parent then gameL.Text = (ok and gi and gi.Name) or "unknown" end
+                end)
+                section("CURRENT SERVER")
+                info("Place ID", game.PlaceId)
+                info("Players", #Players:GetPlayers() .. " / " .. Players.MaxPlayers)
+                local jid = game.JobId
+                info("Server ID", jid ~= "" and (string.sub(jid, 1, 8) .. "...") or "Studio / private")
+
+                Theme.recolor(p)
+            end
+
             -- ===== search pill =====
             local sbox = Instance.new("Frame")
             sbox.Position = UDim2.fromOffset(60, 16)
@@ -3791,7 +4026,7 @@ task.spawn(function()
             sdot.BorderSizePixel = 0
             sdot.Parent = card
             corner(sdot, 5)
-            local statusL = lbl(card, "Online  |  In game", 100, 58, 150, 16, 11, GREEN)
+            local statusL = lbl(card, "Online  |  In game", 100, 58, 108, 16, 11, GREEN)
             statusL:SetAttribute("tc", true)   -- status colours are not themed
             sdot:SetAttribute("tc", true)
             task.spawn(function()
@@ -3802,6 +4037,22 @@ task.spawn(function()
                     statusL.Text = "Online  |  " .. info.Name
                 end
             end)
+
+            -- clicking the profile card opens your full profile
+            lbl(card, "VIEW >", 208, 58, 44, 16, 9, MUTED, Enum.Font.GothamBold, Enum.TextXAlignment.Right)
+            local cardHit = Instance.new("TextButton")
+            cardHit.Text = ""
+            cardHit.BackgroundTransparency = 1
+            cardHit.Size = UDim2.fromScale(1, 1)
+            cardHit.ZIndex = 6
+            cardHit.Parent = card
+            local cardSc = Instance.new("UIScale")
+            cardSc.Parent = card
+            cardHit.MouseEnter:Connect(function() tw(cardSc, 0.4, { Scale = 1.02 }, Enum.EasingStyle.Back) end)
+            cardHit.MouseLeave:Connect(function() tw(cardSc, 0.4, { Scale = 1 }, Enum.EasingStyle.Back) end)
+            cardHit.InputBegan:Connect(function(io) if isPress(io) then tw(cardSc, 0.1, { Scale = 0.97 }); ripple(card, io, fit.Scale) end end)
+            cardHit.InputEnded:Connect(function(io) if isPress(io) then tw(cardSc, 0.4, { Scale = 1 }, Enum.EasingStyle.Back) end end)
+            cardHit.Activated:Connect(openProfile)
 
             -- ===== bottom bar =====
             local bar = Instance.new("Frame")
