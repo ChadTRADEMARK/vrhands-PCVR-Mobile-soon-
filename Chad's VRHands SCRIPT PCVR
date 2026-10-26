@@ -54,6 +54,11 @@ local SCRIPT_VERSION = "1.0.0"
 --     "key_system": "online", "script": "working", "message": "All good" }
 -- banwave: clear | warning | active    key_system: online | offline | none    script: working | updating | patched
 local STATUS_URL = ""
+-- Auto-update: while the script runs it re-checks UPDATE_URL. When the file on GitHub changes
+-- (new SCRIPT_VERSION, or any change to the file) it shows a 5 second countdown, then restarts
+-- itself with the new version. The player can press CANCEL on the countdown.
+local AUTO_UPDATE = true
+local AUTO_UPDATE_SECONDS = 20   -- how often to check (minimum 10)
 
 do
     -- The only hard requirement is SOME way to hook the game's metatable.
@@ -93,6 +98,8 @@ local PRELUDE = "local C = (function()\n" .. SHIM .. "\nend)()\n"
     .. "local UPDATE_URL = " .. string.format("%q", UPDATE_URL) .. "\n"
     .. "local SCRIPT_VERSION = " .. string.format("%q", SCRIPT_VERSION) .. "\n"
     .. "local STATUS_URL = " .. string.format("%q", STATUS_URL) .. "\n"
+    .. "local AUTO_UPDATE = " .. tostring(AUTO_UPDATE) .. "\n"
+    .. "local AUTO_UPDATE_SECONDS = " .. tostring(AUTO_UPDATE_SECONDS) .. "\n"
 
 local hrs = PRELUDE .. [==[
 local VRService   = game:GetService("VRService")
@@ -2786,7 +2793,7 @@ task.spawn(function()
             end
             local pg = lp:FindFirstChild("PlayerGui")
             if pg then
-                for _, n in ipairs({ "NoVR_Mobile", "NoVR_MobileToggle", "NoVR_HUD", "NoVR_StartToggle", "NoVR_Start", "NoVR_Crosshair", "NoVR_Loader" }) do
+                for _, n in ipairs({ "NoVR_Mobile", "NoVR_MobileToggle", "NoVR_HUD", "NoVR_StartToggle", "NoVR_Start", "NoVR_Crosshair", "NoVR_Loader", "NoVR_UpdateToast" }) do
                     local o = pg:FindFirstChild(n)
                     if o then o:Destroy() end
                 end
@@ -2837,6 +2844,114 @@ task.spawn(function()
             end
         end
         -- ==================================
+
+        -- ============ AUTO UPDATE WATCHER ============
+        -- Polls UPDATE_URL. A change = a different SCRIPT_VERSION, or (if the version was not bumped)
+        -- any change to the file since the first check. Then: countdown toast -> performUpdate().
+        _G.NoVR_Gen = (_G.NoVR_Gen or 0) + 1
+        local myGen = _G.NoVR_Gen
+
+        local function promptUpdate(newVer)
+            local pg = lp:WaitForChild("PlayerGui")
+            local old = pg:FindFirstChild("NoVR_UpdateToast")
+            if old then old:Destroy() end
+
+            local tg = Instance.new("ScreenGui")
+            tg.Name = "NoVR_UpdateToast"
+            tg.ResetOnSpawn = false
+            tg.IgnoreGuiInset = true
+            tg.DisplayOrder = 150
+            tg.Parent = pg
+
+            local card = Instance.new("Frame")
+            card.AnchorPoint = Vector2.new(0.5, 0)
+            card.Position = UDim2.new(0.5, 0, 0, -90)
+            card.Size = UDim2.fromOffset(360, 66)
+            card.BackgroundColor3 = C(40, 20, 96)
+            card.BackgroundTransparency = 0.08
+            card.BorderSizePixel = 0
+            card.Parent = tg
+            corner(card, 12)
+            stroke(card, C(215, 185, 255), 1.5, 0.3)
+            lbl(card, "UPDATE FOUND", 14, 8, 200, 18, 12, GREEN)
+            local msg = lbl(card, "", 14, 28, 250, 30, 11, WHITE, Enum.Font.GothamMedium)
+            msg.TextWrapped = true
+            msg.TextTruncate = Enum.TextTruncate.None
+            msg.TextYAlignment = Enum.TextYAlignment.Top
+
+            local cancel = Instance.new("TextButton")
+            cancel.AnchorPoint = Vector2.new(1, 0.5)
+            cancel.Position = UDim2.new(1, -10, 0.5, 0)
+            cancel.Size = UDim2.fromOffset(78, 30)
+            cancel.AutoButtonColor = false
+            cancel.BackgroundColor3 = PINK
+            cancel.BackgroundTransparency = 0.3
+            cancel.BorderSizePixel = 0
+            cancel.Text = "CANCEL"
+            cancel.Font = Enum.Font.GothamBold
+            cancel.TextSize = 12
+            cancel.TextColor3 = WHITE
+            cancel.Parent = card
+            corner(cancel, 8)
+            Theme.recolor(tg)
+            tw(card, 0.6, { Position = UDim2.new(0.5, 0, 0, 12) }, Enum.EasingStyle.Back)
+
+            local cancelled = false
+            cancel.Activated:Connect(function() cancelled = true end)
+            for i = 5, 1, -1 do
+                if cancelled then break end
+                msg.Text = "v" .. SCRIPT_VERSION .. "  ->  " .. (newVer and ("v" .. newVer) or "new version")
+                    .. "\nRestarting in " .. i .. "s"
+                task.wait(1)
+            end
+            if cancelled then
+                tw(card, 0.4, { Position = UDim2.new(0.5, 0, 0, -90) }, Enum.EasingStyle.Sine)
+                task.delay(0.5, function() tg:Destroy() end)
+                return false
+            end
+            cancel.Visible = false
+            msg.Text = "Updating..."
+            performUpdate(function(m, isErr)
+                if msg.Parent then
+                    msg.Text = m
+                    msg.TextColor3 = isErr and C(255, 130, 140) or GREEN
+                    msg:SetAttribute("tc", true)
+                end
+            end)
+            -- still running here = the update failed (or the old copy is being replaced)
+            task.wait(4)
+            if tg.Parent then tg:Destroy() end
+            return true
+        end
+
+        task.spawn(function()
+            if AUTO_UPDATE ~= true then return end
+            if type(UPDATE_URL) ~= "string" or UPDATE_URL == "" or string.find(UPDATE_URL, "PUT_YOUR", 1, true) then return end
+            local every = math.max(tonumber(AUTO_UPDATE_SECONDS) or 20, 10)
+            local baseline, skipped
+            task.wait(8)
+            while _G.NoVR_Gen == myGen do
+                if not updating then
+                    local src = fetchSource(UPDATE_URL)
+                    if src and #src > 1000 then
+                        if baseline == nil then baseline = src end
+                        local newVer = src:match('SCRIPT_VERSION%s*=%s*"([%w%.%-]+)"')
+                        local changed = (newVer ~= nil and newVer ~= SCRIPT_VERSION) or (src ~= baseline)
+                        if changed and src ~= skipped then
+                            -- never restart into a broken push
+                            local fn = (EXEC.loadstring or loadstring or load)(src)
+                            if fn then
+                                if not promptUpdate(newVer) then skipped = src end   -- cancelled: don't ask again for this file
+                            else
+                                skipped = src
+                            end
+                        end
+                    end
+                end
+                task.wait(every)
+            end
+        end)
+        -- ==============================================
 
         local function openStart()
             if startGui then return end
@@ -4059,6 +4174,8 @@ task.spawn(function()
                     sRow("Script version", SCRIPT_VERSION)
                     local rNew    = sRow("Latest version", "checking...")
                     local rScript = sRow("Script status", "checking...")
+                    sRow("Auto-update", AUTO_UPDATE == true and ("On, every " .. math.max(tonumber(AUTO_UPDATE_SECONDS) or 20, 10) .. "s") or "Off",
+                         AUTO_UPDATE == true and "ok" or nil)
                     sRow("Gestures / grab", Input and "Hooked" or "Not found", Input and "ok" or "warn")
                     sRow("Executor", execText)
 
