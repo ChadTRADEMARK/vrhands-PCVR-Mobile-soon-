@@ -2540,6 +2540,35 @@ task.spawn(function()
             t.Parent = parent
             return t
         end
+        -- A UIGradient on a TextButton also tints the button's own text, which made the label
+        -- invisible. So the gradient goes on a separate fill frame and the text on its own label.
+        local function gradButton(btn, text, c1, c2, rot, radius, size, font)
+            btn.BackgroundTransparency = 1
+            btn.Text = ""
+            local fill = Instance.new("Frame")
+            fill.Name = "Fill"
+            fill.Size = UDim2.fromScale(1, 1)
+            fill.BackgroundColor3 = Color3.new(1, 1, 1)
+            fill.BorderSizePixel = 0
+            fill.Active = false
+            fill.ZIndex = 1
+            fill.Parent = btn
+            corner(fill, radius)
+            grad(fill, c1, c2, rot)
+            local t = Instance.new("TextLabel")
+            t.Name = "Txt"
+            t.BackgroundTransparency = 1
+            t.Size = UDim2.fromScale(1, 1)
+            t.Text = text
+            t.Font = font
+            t.TextSize = size
+            t.TextColor3 = WHITE
+            t.ZIndex = 3
+            t.Active = false
+            t.Parent = btn
+            return t
+        end
+
         local function isPress(io)
             return io.UserInputType == Enum.UserInputType.Touch or io.UserInputType == Enum.UserInputType.MouseButton1
         end
@@ -2800,7 +2829,7 @@ task.spawn(function()
             end
             local pg = lp:FindFirstChild("PlayerGui")
             if pg then
-                for _, n in ipairs({ "NoVR_Mobile", "NoVR_MobileToggle", "NoVR_HUD", "NoVR_StartToggle", "NoVR_Start", "NoVR_Crosshair", "NoVR_Loader", "NoVR_Welcome", "NoVR_UpdateToast" }) do
+                for _, n in ipairs({ "NoVR_Mobile", "NoVR_MobileToggle", "NoVR_HUD", "NoVR_StartToggle", "NoVR_Start", "NoVR_Crosshair", "NoVR_Loader", "NoVR_UpdateToast" }) do
                     local o = pg:FindFirstChild(n)
                     if o then o:Destroy() end
                 end
@@ -2809,8 +2838,6 @@ task.spawn(function()
             if b then b:Destroy() end
             local lb = Lighting:FindFirstChild("NoVR_LoadBlur")
             if lb then lb:Destroy() end
-            local wb = Lighting:FindFirstChild("NoVR_WelcomeBlur")
-            if wb then wb:Destroy() end
             local h = workspace:FindFirstChild("NoVR_LocalHead")
             if h then h:Destroy() end
             UIS.MouseBehavior = Enum.MouseBehavior.Default
@@ -2859,6 +2886,8 @@ task.spawn(function()
         -- any change to the file since the first check. Then: countdown toast -> performUpdate().
         _G.NoVR_Gen = (_G.NoVR_Gen or 0) + 1
         local myGen = _G.NoVR_Gen
+        -- what the watcher last did (shown live on the Profile > STATUS tab)
+        local AU = { text = "Starting...", level = nil }
 
         local function promptUpdate(newVer)
             local pg = lp:WaitForChild("PlayerGui")
@@ -2934,28 +2963,53 @@ task.spawn(function()
         end
 
         task.spawn(function()
-            if AUTO_UPDATE ~= true then return end
-            if type(UPDATE_URL) ~= "string" or UPDATE_URL == "" or string.find(UPDATE_URL, "PUT_YOUR", 1, true) then return end
+            if AUTO_UPDATE ~= true then AU.text, AU.level = "Off", nil return end
+            if type(UPDATE_URL) ~= "string" or UPDATE_URL == "" or string.find(UPDATE_URL, "PUT_YOUR", 1, true) then
+                AU.text, AU.level = "UPDATE_URL not set", "warn"
+                return
+            end
             local every = math.max(tonumber(AUTO_UPDATE_SECONDS) or 20, 10)
             local baseline, skipped
-            task.wait(8)
+            task.wait(3)
             while _G.NoVR_Gen == myGen do
-                if not updating then
+                -- pcall: an error in one check must never end the watcher
+                local okc, errc = pcall(function()
+                    if updating then return end
                     local src = fetchSource(UPDATE_URL)
-                    if src and #src > 1000 then
-                        if baseline == nil then baseline = src end
-                        local newVer = src:match('SCRIPT_VERSION%s*=%s*"([%w%.%-]+)"')
-                        local changed = (newVer ~= nil and newVer ~= SCRIPT_VERSION) or (src ~= baseline)
-                        if changed and src ~= skipped then
-                            -- never restart into a broken push
-                            local fn = (EXEC.loadstring or loadstring or load)(src)
-                            if fn then
-                                if not promptUpdate(newVer) then skipped = src end   -- cancelled: don't ask again for this file
-                            else
-                                skipped = src
-                            end
-                        end
+                    local stamp = os.date("%H:%M:%S")
+                    if not (src and #src > 200) then
+                        AU.text, AU.level = stamp .. " - download failed", "warn"
+                        return
                     end
+                    if baseline == nil then baseline = src end
+                    local newVer = src:match('SCRIPT_VERSION%s*=%s*"([%w%.%-]+)"')
+                    local changed = (newVer ~= nil and newVer ~= SCRIPT_VERSION) or (src ~= baseline)
+                    if not changed then
+                        AU.text, AU.level = stamp .. " - up to date", "ok"
+                        return
+                    end
+                    if src == skipped then
+                        AU.text, AU.level = stamp .. " - update skipped", "warn"
+                        return
+                    end
+                    -- never restart into a broken push
+                    local fn = (EXEC.loadstring or loadstring or load)(src)
+                    if not fn then
+                        skipped = src
+                        AU.text, AU.level = stamp .. " - new file has an error", "bad"
+                        warn("[NoVR] auto-update: the new file on GitHub does not compile, not applying it")
+                        return
+                    end
+                    AU.text, AU.level = stamp .. " - update found", "warn"
+                    print("[NoVR] auto-update: change detected" .. (newVer and (" (v" .. newVer .. ")") or ""))
+                    if not promptUpdate(newVer) then
+                        skipped = src   -- cancelled: don't ask again for this file
+                        AU.text, AU.level = stamp .. " - cancelled", "warn"
+                    end
+                end)
+                if not okc then
+                    AU.text, AU.level = "error: " .. string.sub(tostring(errc), 1, 40), "bad"
+                    warn("[NoVR] auto-update check failed: " .. tostring(errc))
                 end
                 task.wait(every)
             end
@@ -4269,8 +4323,7 @@ task.spawn(function()
                     sRow("Script version", SCRIPT_VERSION)
                     local rNew    = sRow("Latest version", "checking...")
                     local rScript = sRow("Script status", "checking...")
-                    sRow("Auto-update", AUTO_UPDATE == true and ("On, every " .. math.max(tonumber(AUTO_UPDATE_SECONDS) or 20, 10) .. "s") or "Off",
-                         AUTO_UPDATE == true and "ok" or nil)
+                    local rAU = sRow("Auto-update", AU.text, AU.level)
                     sRow("Gestures / grab", Input and "Hooked" or "Not found", Input and "ok" or "warn")
                     sRow("Executor", execText)
 
@@ -4432,6 +4485,7 @@ task.spawn(function()
                             local okm, mem = pcall(function() return StatsSvc:GetTotalMemoryUsageMb() end)
                             rMem.set(okm and mem and (math.floor(mem + 0.5) .. " MB") or "-")
                             rPl.set(#Players:GetPlayers() .. " / " .. Players.MaxPlayers)
+                            rAU.set(AU.text, AU.level)
                             local t = math.floor(workspace.DistributedGameTime)
                             rUp.set(string.format("%dh %02dm %02ds", t // 3600, (t % 3600) // 60, t % 60))
 
@@ -4498,21 +4552,17 @@ task.spawn(function()
             dcB.AutoButtonColor = false
             dcB.BackgroundColor3 = Color3.new(1, 1, 1)
             dcB.BorderSizePixel = 0
-            dcB.Text = "JOIN DISCORD"
-            dcB.Font = Enum.Font.GothamBlack
-            dcB.TextSize = 12
-            dcB.TextScaled = true
-            dcB.TextColor3 = WHITE
             dcB.Parent = main
+            corner(dcB, 10)
+            local dcLbl = gradButton(dcB, "JOIN DISCORD", PINK, VIOLET, 0, 10, 13, Enum.Font.GothamBlack)
+            dcLbl.TextScaled = true
             local dcPad = Instance.new("UIPadding")
-            dcPad.PaddingLeft, dcPad.PaddingRight = UDim.new(0, 12), UDim.new(0, 12)
+            dcPad.PaddingLeft, dcPad.PaddingRight = UDim.new(0, 10), UDim.new(0, 10)
             dcPad.PaddingTop, dcPad.PaddingBottom = UDim.new(0, 11), UDim.new(0, 11)
-            dcPad.Parent = dcB
+            dcPad.Parent = dcLbl
             local dcCap = Instance.new("UITextSizeConstraint")
             dcCap.MaxTextSize = 13
-            dcCap.Parent = dcB
-            corner(dcB, 10)
-            grad(dcB, PINK, VIOLET, 0)
+            dcCap.Parent = dcLbl
             stroke(dcB, Color3.new(1, 1, 1), 1.5, 0.2)
             local dcS = Instance.new("UIScale")
             dcS.Parent = dcB
@@ -4521,8 +4571,8 @@ task.spawn(function()
             dcB.InputBegan:Connect(function(io) if isPress(io) then tw(dcS, 0.1, { Scale = 0.94 }); ripple(dcB, io, fit.Scale) end end)
             dcB.InputEnded:Connect(function(io) if isPress(io) then tw(dcS, 0.45, { Scale = 1.05 }, Enum.EasingStyle.Back) end end)
             dcB.Activated:Connect(function()
-                dcB.Text = joinDiscord()
-                task.delay(2.2, function() if dcB.Parent then dcB.Text = "JOIN DISCORD" end end)
+                dcLbl.Text = joinDiscord()
+                task.delay(2.2, function() if dcLbl.Parent then dcLbl.Text = "JOIN DISCORD" end end)
             end)
 
             -- divider between the two columns
@@ -4806,7 +4856,7 @@ task.spawn(function()
             go.TextColor3 = WHITE
             go.Parent = bar
             corner(go, 8)
-            grad(go, PINK, VIOLET, 0)
+            gradButton(go, "START", PINK, VIOLET, 0, 8, 14, Enum.Font.GothamBlack)
             stroke(go, Color3.new(1, 1, 1), 2, 0.1)
             local gsc = Instance.new("UIScale")
             gsc.Parent = go
@@ -5014,7 +5064,7 @@ task.spawn(function()
             upd.TextColor3 = WHITE
             upd.Parent = side
             corner(upd, 10)
-            grad(upd, PINK, VIOLET, 0)
+            gradButton(upd, "UPDATE & RESTART", PINK, VIOLET, 0, 10, 13, Enum.Font.GothamBlack)
             stroke(upd, Color3.new(1, 1, 1), 1.5, 0.2)
             local usc = Instance.new("UIScale")
             usc.Parent = upd
@@ -5099,128 +5149,14 @@ task.spawn(function()
             Theme.recolor(g)
         end
 
-        -- ============ SHARED 3D "M" LOGO ============
-        -- Builds the extruded 3D "M" out of plain frames inside `parent`, centred at (px, py).
-        -- A stack of darker copies behind the front face makes the depth; call logo.step(t)
-        -- every frame (t = seconds since it appeared) and the stack sways like a spinning letter.
-        -- Returns { hold = CanvasGroup, scale = UIScale, step = function(t) }.
-        local function buildLogoM(parent, px, py)
-            local W, H, T = 150, 130, 34
-            local NL = 18                                  -- depth layers
-            local CW, CH = W + 90, H + 90                  -- canvas around the letter
-            local cx0, cy0 = CW / 2, CH / 2
-
-            local mHold = Instance.new("CanvasGroup")
-            mHold.AnchorPoint = Vector2.new(0.5, 0.5)
-            mHold.Position = UDim2.fromOffset(px, py)
-            mHold.Size = UDim2.fromOffset(CW, CH)
-            mHold.BackgroundTransparency = 1
-            mHold.BorderSizePixel = 0
-            mHold.GroupTransparency = 1
-            mHold.Parent = parent
-            local mScale = Instance.new("UIScale")
-            mScale.Scale = 0.6
-            mScale.Parent = mHold
-
-            local function makeHolder(z)
-                local h = Instance.new("Frame")
-                h.AnchorPoint = Vector2.new(0.5, 0.5)
-                h.Position = UDim2.fromOffset(cx0, cy0)
-                h.Size = UDim2.fromOffset(W, H)
-                h.BackgroundTransparency = 1
-                h.ZIndex = z
-                h.Parent = mHold
-                return h
-            end
-            -- four bars: left, right, and the two diagonals that meet in the middle
-            local function makePieces(holder, col)
-                local list = {}
-                local function piece(x, y, w, h, rot)
-                    local f = Instance.new("Frame")
-                    f.AnchorPoint = Vector2.new(0.5, 0.5)
-                    f.Position = UDim2.fromOffset(x, y)
-                    f.Size = UDim2.fromOffset(w, h)
-                    f.Rotation = rot
-                    f.BackgroundColor3 = col
-                    f.BorderSizePixel = 0
-                    f.Parent = holder
-                    corner(f, 8)
-                    list[#list + 1] = f
-                end
-                piece(T / 2, H / 2, T, H, 0)
-                piece(W - T / 2, H / 2, T, H, 0)
-                local sx, sy = T / 2 + 3, T * 0.55
-                local ex, ey = W / 2, H * 0.68
-                local dx, dy = ex - sx, ey - sy
-                local len = math.sqrt(dx * dx + dy * dy) + T * 0.5
-                local ang = math.deg(math.atan2(dy, dx))
-                piece((sx + ex) / 2, (sy + ey) / 2, len, T, ang)
-                piece(W - (sx + ex) / 2, (sy + ey) / 2, len, T, -ang)
-                return list
-            end
-
-            -- depth layers, back (dark) to front
-            local layers = {}
-            for k = NL, 1, -1 do
-                local a = k / NL
-                local h = makeHolder(NL + 1 - k)
-                makePieces(h, C(104, 58, 224):Lerp(C(12, 7, 40), a))
-                layers[k] = h
-            end
-            -- front face with a light-to-deep violet gradient
-            local front = makeHolder(NL + 2)
-            for _, f in ipairs(makePieces(front, Color3.new(1, 1, 1))) do
-                local gr = Instance.new("UIGradient")
-                gr.Color = ColorSequence.new(C(232, 200, 255), C(118, 84, 246))
-                gr.Rotation = 90 - f.Rotation
-                gr.Parent = f
-            end
-            -- shine: a bright band that sweeps across the front face
-            local shine = makeHolder(NL + 3)
-            local shineGr = {}
-            for _, f in ipairs(makePieces(shine, Color3.new(1, 1, 1))) do
-                local gr = Instance.new("UIGradient")
-                gr.Transparency = NumberSequence.new({
-                    NumberSequenceKeypoint.new(0, 1),
-                    NumberSequenceKeypoint.new(0.38, 1),
-                    NumberSequenceKeypoint.new(0.5, 0.25),
-                    NumberSequenceKeypoint.new(0.62, 1),
-                    NumberSequenceKeypoint.new(1, 1),
-                })
-                gr.Rotation = 45 - f.Rotation
-                gr.Offset = Vector2.new(-1, 0)
-                gr.Parent = f
-                shineGr[#shineGr + 1] = gr
-            end
-
-            local logo = { hold = mHold, scale = mScale }
-            -- per-frame motion: extrusion sway, bob, tilt, shine sweep
-            function logo.step(tt)
-                local x = math.clamp((tt - 0.15) / 1.2, 0, 1)
-                local depthK = 1 - (1 - x) ^ 3
-                local ox = math.sin(tt * 1.3) * 1.7
-                local oy = 1.15 + math.cos(tt * 1.05) * 0.4
-                for k = 1, NL do
-                    layers[k].Position = UDim2.fromOffset(cx0 + ox * k * depthK, cy0 + oy * k * depthK)
-                end
-                mHold.Position = UDim2.fromOffset(px, py + math.sin(tt * 2.0) * 5)
-                mHold.Rotation = math.sin(tt * 1.1) * 2.5
-
-                local phase = (tt % 3.2) / 3.2
-                local off = -1 + 2 * math.clamp(phase / 0.45, 0, 1)
-                for _, gr in ipairs(shineGr) do gr.Offset = Vector2.new(off, 0) end
-            end
-            return logo
-        end
-        -- ================================================================
-
         -- ============ LOADING SCREEN (animated 3D "M" logo) ============
-        -- Shows after the welcome screen, before the Start Menu.
+        -- Shows before the Start Menu. The M is built from plain frames: a stack of
+        -- darker copies behind the front face makes the extrusion, and the stack
+        -- sways every frame so it reads as a spinning 3D letter.
         local loaderActive = false
-        local welcomeActive = false
         local rawOpenStart = openStart
         openStart = function()
-            if loaderActive or welcomeActive then return end
+            if loaderActive then return end
             rawOpenStart()
         end
 
@@ -5288,8 +5224,93 @@ task.spawn(function()
             tw(shadowF, 1.0, { BackgroundTransparency = 0.55 }, Enum.EasingStyle.Sine)
 
             -- ===== the M =====
-            local logo = buildLogoM(stage, 260, 190)
-            local mHold, mScale = logo.hold, logo.scale
+            local W, H, T = 150, 130, 34
+            local NL = 18                                  -- depth layers
+            local CW, CH = W + 90, H + 90                  -- canvas around the letter
+            local cx0, cy0 = CW / 2, CH / 2
+
+            local mHold = Instance.new("CanvasGroup")
+            mHold.AnchorPoint = Vector2.new(0.5, 0.5)
+            mHold.Position = UDim2.fromOffset(260, 190)
+            mHold.Size = UDim2.fromOffset(CW, CH)
+            mHold.BackgroundTransparency = 1
+            mHold.BorderSizePixel = 0
+            mHold.GroupTransparency = 1
+            mHold.Parent = stage
+            local mScale = Instance.new("UIScale")
+            mScale.Scale = 0.6
+            mScale.Parent = mHold
+
+            local function makeHolder(z)
+                local h = Instance.new("Frame")
+                h.AnchorPoint = Vector2.new(0.5, 0.5)
+                h.Position = UDim2.fromOffset(cx0, cy0)
+                h.Size = UDim2.fromOffset(W, H)
+                h.BackgroundTransparency = 1
+                h.ZIndex = z
+                h.Parent = mHold
+                return h
+            end
+            -- four bars: left, right, and the two diagonals that meet in the middle
+            local function makePieces(parent, col)
+                local list = {}
+                local function piece(x, y, w, h, rot)
+                    local f = Instance.new("Frame")
+                    f.AnchorPoint = Vector2.new(0.5, 0.5)
+                    f.Position = UDim2.fromOffset(x, y)
+                    f.Size = UDim2.fromOffset(w, h)
+                    f.Rotation = rot
+                    f.BackgroundColor3 = col
+                    f.BorderSizePixel = 0
+                    f.Parent = parent
+                    corner(f, 8)
+                    list[#list + 1] = f
+                end
+                piece(T / 2, H / 2, T, H, 0)
+                piece(W - T / 2, H / 2, T, H, 0)
+                local sx, sy = T / 2 + 3, T * 0.55
+                local ex, ey = W / 2, H * 0.68
+                local dx, dy = ex - sx, ey - sy
+                local len = math.sqrt(dx * dx + dy * dy) + T * 0.5
+                local ang = math.deg(math.atan2(dy, dx))
+                piece((sx + ex) / 2, (sy + ey) / 2, len, T, ang)
+                piece(W - (sx + ex) / 2, (sy + ey) / 2, len, T, -ang)
+                return list
+            end
+
+            -- depth layers, back (dark) to front
+            local layers = {}
+            for k = NL, 1, -1 do
+                local a = k / NL
+                local h = makeHolder(NL + 1 - k)
+                makePieces(h, C(104, 58, 224):Lerp(C(12, 7, 40), a))
+                layers[k] = h
+            end
+            -- front face with a light-to-deep violet gradient
+            local front = makeHolder(NL + 2)
+            for _, f in ipairs(makePieces(front, Color3.new(1, 1, 1))) do
+                local gr = Instance.new("UIGradient")
+                gr.Color = ColorSequence.new(C(232, 200, 255), C(118, 84, 246))
+                gr.Rotation = 90 - f.Rotation
+                gr.Parent = f
+            end
+            -- shine: a bright band that sweeps across the front face
+            local shine = makeHolder(NL + 3)
+            local shineGr = {}
+            for _, f in ipairs(makePieces(shine, Color3.new(1, 1, 1))) do
+                local gr = Instance.new("UIGradient")
+                gr.Transparency = NumberSequence.new({
+                    NumberSequenceKeypoint.new(0, 1),
+                    NumberSequenceKeypoint.new(0.38, 1),
+                    NumberSequenceKeypoint.new(0.5, 0.25),
+                    NumberSequenceKeypoint.new(0.62, 1),
+                    NumberSequenceKeypoint.new(1, 1),
+                })
+                gr.Rotation = 45 - f.Rotation
+                gr.Offset = Vector2.new(-1, 0)
+                gr.Parent = f
+                shineGr[#shineGr + 1] = gr
+            end
 
             -- ===== texts + loading bar =====
             local texts = {}
@@ -5337,9 +5358,21 @@ task.spawn(function()
             conn = RunService.Heartbeat:Connect(function()
                 local tt = os.clock() - t0
                 refit()
-                logo.step(tt)
+                local x = math.clamp((tt - 0.15) / 1.2, 0, 1)
+                local depthK = 1 - (1 - x) ^ 3
+                local ox = math.sin(tt * 1.3) * 1.7
+                local oy = 1.15 + math.cos(tt * 1.05) * 0.4
+                for k = 1, NL do
+                    layers[k].Position = UDim2.fromOffset(cx0 + ox * k * depthK, cy0 + oy * k * depthK)
+                end
+                mHold.Position = UDim2.fromOffset(260, 190 + math.sin(tt * 2.0) * 5)
+                mHold.Rotation = math.sin(tt * 1.1) * 2.5
                 glowSc.Scale = 1 + 0.07 * math.sin(tt * 2.4)
                 shadowF.Size = UDim2.fromOffset(150 + 10 * math.sin(tt * 2.0 + math.pi), 16)
+
+                local phase = (tt % 3.2) / 3.2
+                local off = -1 + 2 * math.clamp(phase / 0.45, 0, 1)
+                for _, gr in ipairs(shineGr) do gr.Offset = Vector2.new(off, 0) end
 
                 pct.Text = math.floor(fill.Size.X.Scale * 100 + 0.5) .. "%"
             end)
@@ -5374,232 +5407,6 @@ task.spawn(function()
                 lblur:Destroy()
                 loaderActive = false
                 rawOpenStart()
-            end)
-        end
-        -- ================================================================
-
-        -- ============ WELCOME SCREEN (before the loading screen) ============
-        -- 3D "M" in the middle with three buttons under it:
-        --   left   JOIN DISCORD       (same invite + same code the other Discord button uses)
-        --   middle START SCRIPT       (continues to the loading screen, then the Start Menu)
-        --   right  CHECK FOR UPDATES  (looks at UPDATE_URL; if a newer version exists the
-        --                              button turns into UPDATE NOW and installs it)
-        local function showWelcome()
-            welcomeActive = true
-            S.menuOpen = true
-            setLook(false)
-
-            local old = Lighting:FindFirstChild("NoVR_WelcomeBlur")
-            if old then old:Destroy() end
-            local wblur = Instance.new("BlurEffect")
-            wblur.Name = "NoVR_WelcomeBlur"
-            wblur.Size = 0
-            wblur.Parent = Lighting
-            tw(wblur, 0.6, { Size = 30 }, Enum.EasingStyle.Sine)
-
-            local g = Instance.new("ScreenGui")
-            g.Name = "NoVR_Welcome"
-            g.ResetOnSpawn = false
-            g.IgnoreGuiInset = true
-            g.DisplayOrder = 200
-            g.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-            g.Parent = lp:WaitForChild("PlayerGui")
-
-            local back = Instance.new("Frame")   -- dark backdrop, also swallows clicks
-            back.Size = UDim2.fromScale(1, 1)
-            back.BackgroundColor3 = Color3.new(1, 1, 1)
-            back.BackgroundTransparency = 1
-            back.BorderSizePixel = 0
-            back.Active = true
-            back.Parent = g
-            grad(back, C(46, 20, 112), C(8, 5, 28), 60)
-            tw(back, 0.5, { BackgroundTransparency = 0.04 })
-
-            local SW, SH = 640, 480
-            local stage = Instance.new("Frame")
-            stage.AnchorPoint = Vector2.new(0.5, 0.5)
-            stage.Position = UDim2.fromScale(0.5, 0.5)
-            stage.Size = UDim2.fromOffset(SW, SH)
-            stage.BackgroundTransparency = 1
-            stage.Parent = g
-            local fitS = Instance.new("UIScale")
-            fitS.Parent = stage
-            local function refit()
-                local v = cam.ViewportSize
-                fitS.Scale = math.clamp(math.min(v.X / (SW + 40), v.Y / (SH + 40)), 0.5, 1.5)
-            end
-            refit()
-
-            -- glow + ground shadow behind / under the logo
-            local glow = softBox(stage, 220, 85, 200, 170, PINK, 70, 14, 0.9, 40)
-            local glowSc = Instance.new("UIScale")
-            glowSc.Parent = glow
-            task.delay(0.2, function() if g.Parent then softFade(glow, true, 1.2) end end)
-
-            local shadowF = Instance.new("Frame")
-            shadowF.AnchorPoint = Vector2.new(0.5, 0.5)
-            shadowF.Position = UDim2.fromOffset(320, 290)
-            shadowF.Size = UDim2.fromOffset(150, 16)
-            shadowF.BackgroundColor3 = C(4, 0, 22)
-            shadowF.BackgroundTransparency = 1
-            shadowF.BorderSizePixel = 0
-            shadowF.Parent = stage
-            corner(shadowF, 8)
-            tw(shadowF, 1.0, { BackgroundTransparency = 0.55 }, Enum.EasingStyle.Sine)
-
-            -- the 3D M
-            local logo = buildLogoM(stage, 320, 160)
-            local mHold, mScale = logo.hold, logo.scale
-
-            -- texts
-            local texts = {}
-            local title = lbl(stage, "V R   H A N D S", 0, 306, SW, 36, 28, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
-            grad(title, C(255, 255, 255), C(190, 150, 255), 0)
-            local sub = lbl(stage, "No-VR  |  Edited by @N4THAFTER", 0, 342, SW, 18, 12, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
-            local status = lbl(stage, "", 0, 436, SW, 30, 11, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
-            status.TextWrapped = true
-            status.TextTruncate = Enum.TextTruncate.None
-            status.TextYAlignment = Enum.TextYAlignment.Top
-            local ver = lbl(stage, "v" .. SCRIPT_VERSION, 0, 460, SW, 14, 10, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
-            for _, t in ipairs({ title, sub, status, ver }) do
-                t.TextTransparency = 1
-                texts[#texts + 1] = t
-            end
-
-            -- the three buttons live in one CanvasGroup so they can fade in together
-            local row = Instance.new("CanvasGroup")
-            row.Size = UDim2.fromOffset(SW, SH)
-            row.BackgroundTransparency = 1
-            row.BorderSizePixel = 0
-            row.GroupTransparency = 1
-            row.Parent = stage
-
-            local function wbtn(text, x, w, h, primary)
-                local b = Instance.new("TextButton")
-                b.AnchorPoint = Vector2.new(0.5, 0.5)
-                b.Position = UDim2.fromOffset(x, 394)
-                b.Size = UDim2.fromOffset(w, h)
-                b.AutoButtonColor = false
-                b.BackgroundColor3 = Color3.new(1, 1, 1)
-                b.BorderSizePixel = 0
-                b.Text = text
-                b.Font = Enum.Font.GothamBlack
-                b.TextSize = primary and 15 or 12
-                b.TextColor3 = WHITE
-                b.TextWrapped = true
-                b.Parent = row
-                local pd = Instance.new("UIPadding")
-                pd.PaddingLeft, pd.PaddingRight = UDim.new(0, 8), UDim.new(0, 8)
-                pd.Parent = b
-                corner(b, 12)
-                if primary then
-                    grad(b, C(214, 128, 255), C(104, 132, 255), 0)
-                else
-                    grad(b, PINK, VIOLET, 0)
-                end
-                stroke(b, Color3.new(1, 1, 1), primary and 2 or 1.5, 0.2)
-                local s = Instance.new("UIScale")
-                s.Parent = b
-                b.MouseEnter:Connect(function() tw(s, 0.5, { Scale = 1.06 }, Enum.EasingStyle.Back) end)
-                b.MouseLeave:Connect(function() tw(s, 0.45, { Scale = 1 }, Enum.EasingStyle.Back) end)
-                b.InputBegan:Connect(function(io) if isPress(io) then tw(s, 0.1, { Scale = 0.94 }); ripple(b, io, fitS.Scale) end end)
-                b.InputEnded:Connect(function(io) if isPress(io) then tw(s, 0.45, { Scale = 1.06 }, Enum.EasingStyle.Back) end end)
-                return b
-            end
-
-            local dcBtn = wbtn("JOIN DISCORD", 130, 170, 52, false)
-            local goBtn = wbtn("START SCRIPT", 320, 190, 62, true)
-            local upBtn = wbtn("CHECK FOR UPDATES", 510, 170, 52, false)
-
-            -- left: Discord (same invite link / same join function as the Start Menu button)
-            dcBtn.Activated:Connect(function()
-                dcBtn.Text = joinDiscord()
-                task.delay(2.2, function() if dcBtn.Parent then dcBtn.Text = "JOIN DISCORD" end end)
-            end)
-
-            -- right: check for updates, then (if one exists) install it on the next press
-            local function setStatus(msg, isErr)
-                if not status.Parent then return end
-                status.Text = msg
-                status.TextColor3 = isErr and C(255, 130, 140) or GREEN
-                status:SetAttribute("tc", true)
-            end
-            local pendingVer, checking = nil, false
-            upBtn.Activated:Connect(function()
-                if checking then return end
-                if pendingVer then
-                    task.spawn(performUpdate, setStatus)
-                    return
-                end
-                if type(UPDATE_URL) ~= "string" or UPDATE_URL == "" or string.find(UPDATE_URL, "PUT_YOUR", 1, true) then
-                    setStatus("Set UPDATE_URL at the top of the script first.", true)
-                    return
-                end
-                checking = true
-                upBtn.Text = "CHECKING..."
-                setStatus("Checking for updates...", false)
-                task.spawn(function()
-                    local src = fetchSource(UPDATE_URL)
-                    if not src then
-                        upBtn.Text = "CHECK FOR UPDATES"
-                        setStatus("Couldn't reach the update link.", true)
-                    else
-                        local newVer = src:match('SCRIPT_VERSION%s*=%s*"([%w%.%-]+)"')
-                        if newVer and newVer ~= SCRIPT_VERSION then
-                            pendingVer = newVer
-                            upBtn.Text = "UPDATE NOW  (v" .. newVer .. ")"
-                            setStatus("Update found: v" .. SCRIPT_VERSION .. "  ->  v" .. newVer .. "   (press again to install)", false)
-                        else
-                            upBtn.Text = "CHECK FOR UPDATES"
-                            setStatus("You're up to date (v" .. SCRIPT_VERSION .. ").", false)
-                        end
-                    end
-                    checking = false
-                end)
-            end)
-
-            -- entrance
-            tw(mHold, 0.9, { GroupTransparency = 0 }, Enum.EasingStyle.Quint)
-            tw(mScale, 1.0, { Scale = 1 }, Enum.EasingStyle.Back)
-            for i, t in ipairs(texts) do
-                task.delay(0.3 + i * 0.1, function()
-                    if t.Parent then tw(t, 0.6, { TextTransparency = 0 }) end
-                end)
-            end
-            task.delay(0.6, function()
-                if row.Parent then tw(row, 0.7, { GroupTransparency = 0 }, Enum.EasingStyle.Quint) end
-            end)
-
-            -- per-frame motion
-            local t0 = os.clock()
-            local conn
-            conn = RunService.Heartbeat:Connect(function()
-                local tt = os.clock() - t0
-                refit()
-                logo.step(tt)
-                glowSc.Scale = 1 + 0.07 * math.sin(tt * 2.4)
-                shadowF.Size = UDim2.fromOffset(150 + 10 * math.sin(tt * 2.0 + math.pi), 16)
-            end)
-
-            -- middle: start the script -> exit animation -> loading screen -> Start Menu
-            local leaving = false
-            goBtn.Activated:Connect(function()
-                if leaving then return end
-                leaving = true
-                tw(mScale, 0.5, { Scale = 1.3 }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
-                tw(mHold, 0.5, { GroupTransparency = 1 }, Enum.EasingStyle.Sine)
-                tw(row, 0.4, { GroupTransparency = 1 }, Enum.EasingStyle.Sine)
-                softFade(glow, false, 0.4)
-                tw(shadowF, 0.4, { BackgroundTransparency = 1 })
-                for _, t in ipairs(texts) do tw(t, 0.4, { TextTransparency = 1 }) end
-                tw(back, 0.55, { BackgroundTransparency = 1 }, Enum.EasingStyle.Sine)
-                tw(wblur, 0.55, { Size = 0 }, Enum.EasingStyle.Sine)
-                task.wait(0.6)
-                conn:Disconnect()
-                g:Destroy()
-                wblur:Destroy()
-                welcomeActive = false
-                showLoader()
             end)
         end
         -- ================================================================
@@ -5654,7 +5461,7 @@ task.spawn(function()
             end
         end)
 
-        showWelcome()   -- welcome screen -> loading screen -> start menu
+        showLoader()   -- loading screen, then the start menu opens
     end
 
     print("[NoVR] control active.")
