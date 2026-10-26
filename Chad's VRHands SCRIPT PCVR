@@ -46,6 +46,15 @@ local C = ((loadstring or load)(SHIM))()
 local UPDATE_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR-Mobile-soon-/refs/heads/main/Chad's%20VRHands%20SCRIPT%20PCVR"
 -- ==========================================================
 
+-- Shown in Start Menu > Profile > STATUS tab. Bump SCRIPT_VERSION whenever you publish a new version.
+local SCRIPT_VERSION = "1.0.0"
+-- Optional: RAW link to a small JSON file YOU host. It feeds the Banwave / Key system / Script rows.
+-- Leave "" to skip. Example file:
+--   { "banwave": "clear", "banwave_note": "No wave reported",
+--     "key_system": "online", "script": "working", "message": "All good" }
+-- banwave: clear | warning | active    key_system: online | offline | none    script: working | updating | patched
+local STATUS_URL = ""
+
 do
     -- The only hard requirement is SOME way to hook the game's metatable.
     -- Everything else degrades gracefully (see notes in the report).
@@ -82,6 +91,8 @@ local TeleportService = game:GetService("TeleportService")
 local PRELUDE = "local C = (function()\n" .. SHIM .. "\nend)()\n"
     .. "local EXEC = C\n"
     .. "local UPDATE_URL = " .. string.format("%q", UPDATE_URL) .. "\n"
+    .. "local SCRIPT_VERSION = " .. string.format("%q", SCRIPT_VERSION) .. "\n"
+    .. "local STATUS_URL = " .. string.format("%q", STATUS_URL) .. "\n"
 
 local hrs = PRELUDE .. [==[
 local VRService   = game:GetService("VRService")
@@ -3637,8 +3648,15 @@ task.spawn(function()
 
             -- ---------- PROFILE panel (your Roblox profile info) ----------
             local function openProfile()
-                local p = overlay("profile", 75, 20, 430, 400, "Profile", "My Roblox profile")
-                if not p then return end
+                local root = overlay("profile", 75, 8, 430, 432, "Profile", "My Roblox profile")
+                if not root then return end
+                -- page 1 (profile) is built into `p`; page 2 (status) is built into `stp` further down
+                local p = Instance.new("Frame")
+                p.Position = UDim2.fromOffset(0, 30)
+                p.Size = UDim2.fromOffset(430, 400)
+                p.BackgroundTransparency = 1
+                p.BorderSizePixel = 0
+                p.Parent = root
 
                 local av = Instance.new("ImageLabel")
                 av.Position = UDim2.fromOffset(20, 56)
@@ -3854,7 +3872,367 @@ task.spawn(function()
                 local jid = game.JobId
                 info("Server ID", jid ~= "" and (string.sub(jid, 1, 8) .. "...") or "Studio / private")
 
-                Theme.recolor(p)
+                -- ===== tabs: PROFILE | STATUS =====
+                local stp = Instance.new("Frame")
+                stp.Position = UDim2.fromOffset(0, 30)
+                stp.Size = UDim2.fromOffset(430, 400)
+                stp.BackgroundTransparency = 1
+                stp.BorderSizePixel = 0
+                stp.Visible = false
+                stp.Parent = root
+
+                local tabs = {}
+                local built = false
+                local buildStatus
+
+                -- "Updated hh:mm:ss" text and the REFRESH button live in the tab row (status tab only)
+                local statusL = lbl(root, "", 250, 52, 90, 18, 10, MUTED)
+                statusL.Visible = false
+                local rf = Instance.new("TextButton")
+                rf.Position = UDim2.fromOffset(340, 48)
+                rf.Size = UDim2.fromOffset(74, 26)
+                rf.AutoButtonColor = false
+                rf.BackgroundColor3 = PINK
+                rf.BackgroundTransparency = 0.35
+                rf.BorderSizePixel = 0
+                rf.Text = "REFRESH"
+                rf.Font = Enum.Font.GothamBold
+                rf.TextSize = 11
+                rf.TextColor3 = WHITE
+                rf.ZIndex = 9
+                rf.Visible = false
+                rf.Parent = root
+                corner(rf, 8)
+                rf.InputBegan:Connect(function(io) if isPress(io) then ripple(rf, io, fit.Scale) end end)
+
+                local function selectTab(key)
+                    p.Visible = key == "profile"
+                    stp.Visible = key == "status"
+                    rf.Visible = key == "status"
+                    statusL.Visible = key == "status"
+                    for k, t in pairs(tabs) do
+                        tw(t, 0.25, { BackgroundTransparency = (k == key) and 0.1 or 0.85 })
+                    end
+                    if key == "status" and not built then
+                        built = true
+                        local okb, eb = pcall(buildStatus)
+                        if not okb then warn("[NoVR] status tab failed: " .. tostring(eb)) end
+                    end
+                end
+                local function tabBtn(text, x, key)
+                    local b = Instance.new("TextButton")
+                    b.Position = UDim2.fromOffset(x, 48)
+                    b.Size = UDim2.fromOffset(100, 26)
+                    b.AutoButtonColor = false
+                    b.BackgroundColor3 = PINK
+                    b.BackgroundTransparency = 0.85
+                    b.BorderSizePixel = 0
+                    b.Text = text
+                    b.Font = Enum.Font.GothamBold
+                    b.TextSize = 12
+                    b.TextColor3 = WHITE
+                    b.ZIndex = 9
+                    b.Parent = root
+                    corner(b, 8)
+                    local s2 = Instance.new("UIScale")
+                    s2.Parent = b
+                    b.MouseEnter:Connect(function() tw(s2, 0.4, { Scale = 1.06 }, Enum.EasingStyle.Back) end)
+                    b.MouseLeave:Connect(function() tw(s2, 0.4, { Scale = 1 }, Enum.EasingStyle.Back) end)
+                    b.InputBegan:Connect(function(io) if isPress(io) then tw(s2, 0.1, { Scale = 0.94 }); ripple(b, io, fit.Scale) end end)
+                    b.InputEnded:Connect(function(io) if isPress(io) then tw(s2, 0.4, { Scale = 1 }, Enum.EasingStyle.Back) end end)
+                    b.Activated:Connect(function() selectTab(key) end)
+                    tabs[key] = b
+                end
+                tabBtn("PROFILE", 20, "profile")
+                tabBtn("STATUS", 128, "status")
+                tabs.profile.BackgroundTransparency = 0.1
+
+                -- ===== STATUS page: Roblox version / banwave / key system / script / device / session =====
+                buildStatus = function()
+                    local HttpService = game:GetService("HttpService")
+                    local StatsSvc    = game:GetService("Stats")
+                    local COLS = { ok = GREEN, warn = C(255, 205, 110), bad = C(255, 110, 120) }
+
+                    -- platform (also decides which Roblox build to look up)
+                    local platName, platBinary
+                    do
+                        local raw = "Unknown"
+                        local okp, v = pcall(function() return UIS:GetPlatform() end)
+                        if okp and v then raw = (tostring(v):gsub("^Enum%.Platform%.", "")) end
+                        platName, platBinary = raw, "WindowsPlayer"
+                        if raw == "Windows" or raw == "UWP" then
+                            platName, platBinary = "Windows PC", "WindowsPlayer"
+                        elseif raw == "OSX" then
+                            platName, platBinary = "macOS", "MacPlayer"
+                        elseif raw == "IOS" then
+                            platName, platBinary = "iOS", "iOS"
+                        elseif raw == "Android" then
+                            platName, platBinary = "Android", "AndroidApp"
+                        elseif raw == "XBoxOne" or raw == "PS4" or raw == "PS5" or raw == "XBox360" then
+                            platName = "Console (" .. raw .. ")"
+                        elseif raw == "None" or raw == "Unknown" then
+                            if UIS.TouchEnabled and not UIS.KeyboardEnabled then
+                                platName, platBinary = "Mobile / tablet", "AndroidApp"
+                            elseif UIS.KeyboardEnabled then
+                                platName = "PC"
+                            end
+                        end
+                    end
+                    local execText = "unknown"
+                    do
+                        local ok, a, b = pcall(function() return identifyexecutor() end)
+                        if ok and a then execText = tostring(a) .. (b and (" " .. tostring(b)) or "") end
+                    end
+
+                    local ssc = Instance.new("ScrollingFrame")
+                    ssc.Position = UDim2.fromOffset(12, 52)
+                    ssc.Size = UDim2.fromOffset(406, 340)
+                    ssc.BackgroundTransparency = 1
+                    ssc.BorderSizePixel = 0
+                    ssc.ScrollBarThickness = 4
+                    ssc.CanvasSize = UDim2.new()
+                    ssc.AutomaticCanvasSize = Enum.AutomaticSize.Y
+                    ssc.ScrollingDirection = Enum.ScrollingDirection.Y
+                    ssc.Parent = stp
+                    local sl = Instance.new("UIListLayout")
+                    sl.Padding = UDim.new(0, 4)
+                    sl.SortOrder = Enum.SortOrder.LayoutOrder
+                    sl.Parent = ssc
+
+                    local n = 0
+                    local function sSection(title)
+                        n += 1
+                        local f = Instance.new("Frame")
+                        f.LayoutOrder = n
+                        f.Size = UDim2.new(1, -8, 0, 22)
+                        f.BackgroundTransparency = 1
+                        f.Parent = ssc
+                        lbl(f, title, 4, 4, 300, 16, 11, MUTED)
+                    end
+                    -- a row: status dot + label + value; call r.set(text, "ok"/"warn"/"bad"/nil) to update
+                    local function sRow(label, text, state)
+                        n += 1
+                        local f = Instance.new("Frame")
+                        f.LayoutOrder = n
+                        f.Size = UDim2.new(1, -8, 0, 30)
+                        f.BackgroundColor3 = Color3.new(1, 1, 1)
+                        f.BackgroundTransparency = 0.86
+                        f.BorderSizePixel = 0
+                        f.Parent = ssc
+                        corner(f, 8)
+                        local dot = Instance.new("Frame")
+                        dot.Position = UDim2.fromOffset(10, 11)
+                        dot.Size = UDim2.fromOffset(8, 8)
+                        dot.BackgroundTransparency = 1
+                        dot.BorderSizePixel = 0
+                        dot.Parent = f
+                        corner(dot, 4)
+                        dot:SetAttribute("tc", true)   -- status colours are not themed
+                        lbl(f, label, 26, 0, 120, 30, 12, WHITE)
+                        local val = lbl(f, "", 140, 0, 244, 30, 12, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Right)
+                        val:SetAttribute("tc", true)
+                        local r = {}
+                        function r.set(t, st)
+                            if not val.Parent then return end
+                            val.Text = tostring(t)
+                            local c = st and COLS[st]
+                            val.TextColor3 = c or MUTED
+                            dot.BackgroundTransparency = c and 0 or 1
+                            if c then dot.BackgroundColor3 = c end
+                        end
+                        r.set(text or "...", state)
+                        return r
+                    end
+
+                    sSection("ROBLOX  (live)")
+                    local rLocal = sRow("Your client", "checking...")
+                    local rLive  = sRow("Latest client", "checking...")
+                    local rHash  = sRow("Version hash", "checking...")
+                    local rBuild = sRow("Build match", "checking...")
+
+                    sSection("PROTECTION  (live)")
+                    local rBan = sRow("Banwave", "checking...")
+                    local rKey = sRow("Key system", "checking...")
+                    local rMsg = sRow("Notice", "-")
+
+                    sSection("SCRIPT")
+                    sRow("Script version", SCRIPT_VERSION)
+                    local rNew    = sRow("Latest version", "checking...")
+                    local rScript = sRow("Script status", "checking...")
+                    sRow("Gestures / grab", Input and "Hooked" or "Not found", Input and "ok" or "warn")
+                    sRow("Executor", execText)
+
+                    sSection("DEVICE")
+                    sRow("Platform", platName)
+                    local inputs = {}
+                    if UIS.TouchEnabled then inputs[#inputs + 1] = "Touch" end
+                    if UIS.KeyboardEnabled then inputs[#inputs + 1] = "Keyboard" end
+                    if UIS.MouseEnabled then inputs[#inputs + 1] = "Mouse" end
+                    if UIS.GamepadEnabled then inputs[#inputs + 1] = "Gamepad" end
+                    sRow("Input", #inputs > 0 and table.concat(inputs, ", ") or "unknown")
+
+                    sSection("SESSION  (live)")
+                    local rFps  = sRow("FPS", "-")
+                    local rPing = sRow("Ping", "-")
+                    local rMem  = sRow("Memory", "-")
+                    local rPl   = sRow("Players", "-")
+                    local rUp   = sRow("Server uptime", "-")
+                    sRow("Place ID", game.PlaceId)
+                    sRow("Server ID", jid ~= "" and (string.sub(jid, 1, 8) .. "...") or "Studio / private")
+
+                    -- ---- web requests ----
+                    local function httpGet(url)
+                        local req = (syn and syn.request) or http_request or request or (fluxus and fluxus.request)
+                        if req then
+                            local ok, res = pcall(req, { Url = url, Method = "GET", Headers = { ["Cache-Control"] = "no-cache" } })
+                            if ok and res and (res.Success or res.StatusCode == 200)
+                               and type(res.Body) == "string" and #res.Body > 0 then
+                                return res.Body
+                            end
+                        end
+                        local ok, body = pcall(function() return game:HttpGet(url, true) end)
+                        if ok and type(body) == "string" and #body > 0 then return body end
+                        return nil
+                    end
+                    local function getJson(url)
+                        local body = httpGet(url)
+                        if not body then return nil end
+                        local ok, data = pcall(HttpService.JSONDecode, HttpService, body)
+                        return (ok and type(data) == "table") and data or nil
+                    end
+
+                    local busy = false
+                    local function refreshWeb()
+                        if busy then return end
+                        busy = true
+                        statusL.Text = "Checking..."
+                        task.spawn(function()
+                            -- Roblox client version + hash (Roblox's own client settings API)
+                            local localVer
+                            pcall(function() localVer = version() end)
+                            rLocal.set(localVer and tostring(localVer) or "unknown", (not localVer) and "warn" or nil)
+                            local live = getJson("https://clientsettings.roblox.com/v2/client-version/" .. platBinary)
+                            if live and live.clientVersionUpload then
+                                rLive.set(tostring(live.version or "?"), "ok")
+                                rHash.set(tostring(live.clientVersionUpload), "ok")
+                                if localVer and live.version then
+                                    if tostring(localVer) == tostring(live.version) then
+                                        rBuild.set("Up to date", "ok")
+                                    else
+                                        rBuild.set("Different from live", "warn")
+                                    end
+                                else
+                                    rBuild.set("Can't compare", "warn")
+                                end
+                            else
+                                rLive.set("Unavailable", "warn")
+                                rHash.set("Unavailable", "warn")
+                                rBuild.set("Unavailable", "warn")
+                            end
+
+                            -- your own status file (banwave / key system / script / notice)
+                            local remote
+                            if type(STATUS_URL) == "string" and STATUS_URL ~= "" then
+                                remote = getJson(STATUS_URL)
+                            end
+                            if type(STATUS_URL) ~= "string" or STATUS_URL == "" then
+                                rBan.set("Not configured", nil)
+                                rKey.set("None (keyless script)", "ok")
+                                rMsg.set("Set STATUS_URL to enable", nil)
+                            elseif not remote then
+                                rBan.set("Status file unreachable", "warn")
+                                rKey.set("Status file unreachable", "warn")
+                                rMsg.set("-", nil)
+                            else
+                                local b = string.lower(tostring(remote.banwave or ""))
+                                local note = remote.banwave_note and (" - " .. tostring(remote.banwave_note)) or ""
+                                if b == "clear" then rBan.set("Clear" .. note, "ok")
+                                elseif b == "warning" then rBan.set("Warning" .. note, "warn")
+                                elseif b == "active" then rBan.set("ACTIVE" .. note, "bad")
+                                else rBan.set("Unknown", nil) end
+
+                                local k = string.lower(tostring(remote.key_system or ""))
+                                if k == "online" then rKey.set("Online", "ok")
+                                elseif k == "offline" then rKey.set("Offline", "bad")
+                                elseif k == "none" or k == "" then rKey.set("None (keyless script)", "ok")
+                                else rKey.set(k, nil) end
+
+                                rMsg.set(remote.message and tostring(remote.message) or "-", nil)
+                            end
+
+                            -- script version: compare with the copy at UPDATE_URL
+                            local latest
+                            if type(UPDATE_URL) == "string" and UPDATE_URL ~= "" then
+                                local text = fetchSource(UPDATE_URL)
+                                if text then latest = text:match('SCRIPT_VERSION%s*=%s*"([%w%.%-]+)"') end
+                            end
+                            local sState, sText
+                            if latest then
+                                if latest == SCRIPT_VERSION then
+                                    rNew.set(latest, "ok")
+                                    sState, sText = "ok", "Up to date"
+                                else
+                                    rNew.set(latest, "warn")
+                                    sState, sText = "warn", "Update available"
+                                end
+                            else
+                                rNew.set("Unavailable", "warn")
+                                sState, sText = "warn", "Can't check for updates"
+                            end
+                            local override = remote and string.lower(tostring(remote.script or "")) or ""
+                            if override == "working" then sState, sText = "ok", "Working"
+                            elseif override == "updating" then sState, sText = "warn", "Updating"
+                            elseif override == "patched" then sState, sText = "bad", "Patched" end
+                            rScript.set(sText, sState)
+
+                            statusL.Text = "Updated " .. os.date("%H:%M:%S")
+                            busy = false
+                        end)
+                    end
+                    rf.Activated:Connect(refreshWeb)
+
+                    -- ---- live local stats (stops when the panel closes) ----
+                    local fps = 60
+                    local hbc = RunService.Heartbeat:Connect(function(dt)
+                        fps = fps + (1 / math.max(dt, 0.001) - fps) * math.min(1, dt * 3)
+                    end)
+                    task.spawn(function()
+                        local sinceWeb = 0
+                        refreshWeb()
+                        while root.Parent do
+                            local f = math.floor(fps + 0.5)
+                            rFps.set(f, f >= 45 and "ok" or (f >= 25 and "warn" or "bad"))
+
+                            local okp, ping = pcall(function()
+                                return StatsSvc.Network.ServerStatsItem["Data Ping"]:GetValue()
+                            end)
+                            if okp and ping then
+                                local pm = math.floor(ping + 0.5)
+                                rPing.set(pm .. " ms", pm <= 120 and "ok" or (pm <= 250 and "warn" or "bad"))
+                            else
+                                rPing.set("-")
+                            end
+
+                            local okm, mem = pcall(function() return StatsSvc:GetTotalMemoryUsageMb() end)
+                            rMem.set(okm and mem and (math.floor(mem + 0.5) .. " MB") or "-")
+                            rPl.set(#Players:GetPlayers() .. " / " .. Players.MaxPlayers)
+                            local t = math.floor(workspace.DistributedGameTime)
+                            rUp.set(string.format("%dh %02dm %02ds", t // 3600, (t % 3600) // 60, t % 60))
+
+                            task.wait(0.5)
+                            sinceWeb += 0.5
+                            if sinceWeb >= 60 then   -- web checks repeat every minute
+                                sinceWeb = 0
+                                refreshWeb()
+                            end
+                        end
+                        hbc:Disconnect()
+                    end)
+
+                    Theme.recolor(stp)
+                end
+
+                Theme.recolor(root)
             end
 
             -- ===== search pill =====
