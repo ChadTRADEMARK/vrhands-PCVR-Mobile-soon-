@@ -1,7 +1,3 @@
--- [[ Rscripts Risk Notice ]]
--- This script is not verified by rscripts.net. Deal with caution.
--- [[ End Rscripts Risk Notice ]]
-
 local SHIM = [=[
 -- Executor compatibility layer: finds whichever version of each function this
 -- executor provides, and falls back gracefully when something is missing.
