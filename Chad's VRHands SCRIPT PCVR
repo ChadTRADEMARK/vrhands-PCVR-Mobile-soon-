@@ -1,7 +1,3 @@
--- [[ Rscripts Risk Notice ]]
--- This script is not verified by rscripts.net. Deal with caution.
--- [[ End Rscripts Risk Notice ]]
-
 local SHIM = [=[
 -- Executor compatibility layer: finds whichever version of each function this
 -- executor provides, and falls back gracefully when something is missing.
@@ -2829,7 +2825,7 @@ task.spawn(function()
             end
             local pg = lp:FindFirstChild("PlayerGui")
             if pg then
-                for _, n in ipairs({ "NoVR_Mobile", "NoVR_MobileToggle", "NoVR_HUD", "NoVR_StartToggle", "NoVR_Start", "NoVR_Crosshair", "NoVR_Loader", "NoVR_UpdateToast" }) do
+                for _, n in ipairs({ "NoVR_Mobile", "NoVR_MobileToggle", "NoVR_HUD", "NoVR_StartToggle", "NoVR_Start", "NoVR_Crosshair", "NoVR_Loader", "NoVR_Gate", "NoVR_UpdateToast" }) do
                     local o = pg:FindFirstChild(n)
                     if o then o:Destroy() end
                 end
@@ -2898,7 +2894,7 @@ task.spawn(function()
             tg.Name = "NoVR_UpdateToast"
             tg.ResetOnSpawn = false
             tg.IgnoreGuiInset = true
-            tg.DisplayOrder = 150
+            tg.DisplayOrder = 250   -- above the welcome / loading screens
             tg.Parent = pg
 
             local card = Instance.new("Frame")
@@ -2983,6 +2979,7 @@ task.spawn(function()
                     end
                     if baseline == nil then baseline = src end
                     local newVer = src:match('SCRIPT_VERSION%s*=%s*"([%w%.%-]+)"')
+                    AU.latest = newVer
                     local changed = (newVer ~= nil and newVer ~= SCRIPT_VERSION) or (src ~= baseline)
                     if not changed then
                         AU.text, AU.level = stamp .. " - up to date", "ok"
@@ -3067,7 +3064,7 @@ task.spawn(function()
         -- Role lookup: reads ROLES_URL once and remembers the answer (retries if it was unreachable).
         local roleState = { done = false, text = nil, found = false, busy = false, waiting = {} }
         local function fetchRole(cb)
-            if roleState.done then cb(roleState.text, roleState.found) return end
+            if roleState.done and os.clock() - (roleState.at or 0) < 10 then cb(roleState.text, roleState.found) return end
             roleState.waiting[#roleState.waiting + 1] = cb
             if roleState.busy then return end
             roleState.busy = true
@@ -3091,12 +3088,26 @@ task.spawn(function()
                         end
                     end
                 end
-                if ok then roleState.done, roleState.text, roleState.found = true, text, found end
+                if ok then roleState.done, roleState.text, roleState.found, roleState.at = true, text, found, os.clock() end
                 roleState.busy = false
                 local list = roleState.waiting
                 roleState.waiting = {}
                 for _, f in ipairs(list) do pcall(f, text, found) end
             end)
+        end
+        -- turns the status file into a detection reading: detection field, else derived from "script"
+        local function detectionOf(remote)
+            local d = string.lower(tostring(remote.detection or ""))
+            if d == "" then
+                local sc = string.lower(tostring(remote.script or ""))
+                if sc == "working" then d = "undetected"
+                elseif sc == "updating" then d = "unknown"
+                elseif sc == "patched" then d = "detected" end
+            end
+            if d == "undetected" then return "Undetected", "ok" end
+            if d == "risky" then return "Risky", "warn" end
+            if d == "detected" then return "DETECTED", "bad" end
+            return "Unknown", "warn"
         end
         -- ==============================================================
 
@@ -4316,6 +4327,7 @@ task.spawn(function()
 
                     sSection("PROTECTION  (live)")
                     local rBan = sRow("Banwave", "checking...")
+                    local rDet = sRow("Detection", "checking...")
                     local rKey = sRow("Key system", "checking...")
                     local rMsg = sRow("Notice", "-")
 
@@ -4401,14 +4413,16 @@ task.spawn(function()
                             -- your own status file (banwave / key system / script / notice)
                             local remote
                             if type(STATUS_URL) == "string" and STATUS_URL ~= "" then
-                                remote = getJson(STATUS_URL)
+                                remote = getJson(STATUS_URL .. (string.find(STATUS_URL, "?", 1, true) and "&" or "?") .. "t=" .. tostring(os.time()))
                             end
                             if type(STATUS_URL) ~= "string" or STATUS_URL == "" then
                                 rBan.set("Not configured", nil)
+                                rDet.set("Not configured", nil)
                                 rKey.set("Unknown", nil)
                                 rMsg.set("Set STATUS_URL to enable", nil)
                             elseif not remote then
                                 rBan.set("Status file unreachable", "warn")
+                                rDet.set("Status file unreachable", "warn")
                                 rKey.set("Status file unreachable", "warn")
                                 rMsg.set("-", nil)
                             else
@@ -4418,6 +4432,7 @@ task.spawn(function()
                                 elseif b == "warning" then rBan.set("Warning" .. note, "warn")
                                 elseif b == "active" then rBan.set("ACTIVE" .. note, "bad")
                                 else rBan.set("Unknown", nil) end
+                                do local dt, ds = detectionOf(remote); rDet.set(dt, ds) end
 
                                 local k = string.lower(tostring(remote.key_system or ""))
                                 if k == "online" then rKey.set("Online", "ok")
@@ -4491,7 +4506,7 @@ task.spawn(function()
 
                             task.wait(0.5)
                             sinceWeb += 0.5
-                            if sinceWeb >= 60 then   -- web checks repeat every minute
+                            if sinceWeb >= 10 then   -- web checks repeat every 10 seconds
                                 sinceWeb = 0
                                 refreshWeb()
                             end
@@ -5411,6 +5426,489 @@ task.spawn(function()
         end
         -- ================================================================
 
+
+        -- ============ WELCOME SCREEN (shows BEFORE the loading screen) ============
+        -- START / JOIN DISCORD / VIEW STATS. The stats page re-checks everything every STATS_EVERY seconds:
+        -- Discord server (members / online), Discord roles, Roblox version + hash, banwave, detection,
+        -- key system, script version and device.
+        local STATS_EVERY = 10
+
+        local function fmtN(n)
+            n = tonumber(n)
+            if not n then return "?" end
+            local r = tostring(math.floor(n)):reverse():gsub("(%d%d%d)", "%1,")
+            r = r:reverse()
+            if r:sub(1, 1) == "," then r = r:sub(2) end
+            return r
+        end
+
+        local function devicePlatform()
+            local raw = "Unknown"
+            local okp, v = pcall(function() return UIS:GetPlatform() end)
+            if okp and v then raw = (tostring(v):gsub("^Enum%.Platform%.", "")) end
+            local name, binary = raw, "WindowsPlayer"
+            if raw == "Windows" or raw == "UWP" then
+                name = "Windows PC"
+            elseif raw == "OSX" then
+                name, binary = "macOS", "MacPlayer"
+            elseif raw == "IOS" then
+                name, binary = "iOS", "iOS"
+            elseif raw == "Android" then
+                name, binary = "Android", "AndroidApp"
+            elseif raw == "XBoxOne" or raw == "PS4" or raw == "PS5" or raw == "XBox360" then
+                name = "Console (" .. raw .. ")"
+            elseif UIS.TouchEnabled and not UIS.KeyboardEnabled then
+                name, binary = "Mobile / tablet", "AndroidApp"
+            elseif UIS.KeyboardEnabled then
+                name = "PC"
+            end
+            return name, binary
+        end
+
+        -- GET + JSON decode. bust = add a changing query so GitHub's cache doesn't serve an old copy
+        local function jsonGet(url, bust)
+            if type(url) ~= "string" or url == "" then return nil end
+            if bust then
+                url = url .. (string.find(url, "?", 1, true) and "&" or "?") .. "t=" .. tostring(os.time())
+            end
+            local body = rawGet(url)
+            if not body then return nil end
+            local ok, data = pcall(HttpSvcD.JSONDecode, HttpSvcD, body)
+            if ok and type(data) == "table" then return data end
+            return nil
+        end
+
+        -- fetches every source at the same time
+        local function collectStats(platBinary)
+            local d = {}
+            local pending = 4
+            local function run(f)
+                task.spawn(function()
+                    pcall(f)
+                    pending = pending - 1
+                end)
+            end
+            run(function()
+                local live = jsonGet("https://clientsettingscdn.roblox.com/v2/client-version/" .. platBinary)
+                if not (live and live.clientVersionUpload) then
+                    live = jsonGet("https://clientsettings.roblox.com/v2/client-version/" .. platBinary)
+                end
+                d.live = live
+            end)
+            run(function() d.status = jsonGet(STATUS_URL, true) end)
+            run(function() d.roles = jsonGet(ROLES_URL, true) end)
+            run(function() d.discord = jsonGet("https://discord.com/api/v10/invites/" .. DISCORD_CODE .. "?with_counts=true") end)
+            local t0 = os.clock()
+            while pending > 0 and os.clock() - t0 < 15 do task.wait(0.1) end
+            return d
+        end
+
+        local function showGate()
+            loaderActive = true
+            S.menuOpen = true
+            setLook(false)
+
+            local pg0 = lp:WaitForChild("PlayerGui")
+            local oldG = pg0:FindFirstChild("NoVR_Gate")
+            if oldG then oldG:Destroy() end
+            local oldB = Lighting:FindFirstChild("NoVR_GateBlur")
+            if oldB then oldB:Destroy() end
+
+            local gblur = Instance.new("BlurEffect")
+            gblur.Name = "NoVR_GateBlur"
+            gblur.Size = 0
+            gblur.Parent = Lighting
+            tw(gblur, 0.6, { Size = 30 }, Enum.EasingStyle.Sine)
+
+            local g = Instance.new("ScreenGui")
+            g.Name = "NoVR_Gate"
+            g.ResetOnSpawn = false
+            g.IgnoreGuiInset = true
+            g.DisplayOrder = 199   -- just under the loading screen (200)
+            g.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+            g.Parent = pg0
+
+            local back = Instance.new("Frame")
+            back.Size = UDim2.fromScale(1, 1)
+            back.BackgroundColor3 = Color3.new(1, 1, 1)
+            back.BackgroundTransparency = 1
+            back.BorderSizePixel = 0
+            back.Active = true   -- swallows clicks meant for the game
+            back.Parent = g
+            grad(back, C(46, 20, 112), C(8, 5, 28), 60)
+            tw(back, 0.5, { BackgroundTransparency = 0.04 })
+
+            local stage = Instance.new("Frame")
+            stage.AnchorPoint = Vector2.new(0.5, 0.5)
+            stage.Position = UDim2.new(0.5, 0, 0.5, 26)
+            stage.Size = UDim2.fromOffset(520, 470)
+            stage.BackgroundTransparency = 1
+            stage.Parent = g
+            local fitS = Instance.new("UIScale")
+            fitS.Parent = stage
+            local function refit()
+                local v = cam.ViewportSize
+                fitS.Scale = math.clamp(math.min(v.X / 560, v.Y / 500), 0.5, 1.5)
+            end
+            refit()
+            local vpConn = cam:GetPropertyChangedSignal("ViewportSize"):Connect(refit)
+            tw(stage, 0.6, { Position = UDim2.fromScale(0.5, 0.5) })
+
+            local alive = true
+            local starting = false
+
+            -- ===== buttons =====
+            local function mkBtn(parent, x, y, w, h, text, kind, onClick)
+                local b = Instance.new("TextButton")
+                b.Position = UDim2.fromOffset(x, y)
+                b.Size = UDim2.fromOffset(w, h)
+                b.AutoButtonColor = false
+                b.BorderSizePixel = 0
+                b.Text = ""
+                b.Parent = parent
+                corner(b, 12)
+                local t
+                if kind == "glass" then
+                    b.BackgroundColor3 = Color3.new(1, 1, 1)
+                    b.BackgroundTransparency = 0.86
+                    stroke(b, C(215, 185, 255), 1.5, 0.4)
+                    t = lbl(b, text, 0, 0, w, h, 14, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+                else
+                    local c1 = (kind == "discord") and C(130, 100, 255) or PINK
+                    local c2 = (kind == "discord") and C(70, 150, 255) or VIOLET
+                    t = gradButton(b, text, c1, c2, 0, 12, (kind == "start") and 17 or 14, Enum.Font.GothamBlack)
+                    stroke(b, WHITE, 1.5, 0.25)
+                end
+                local sc = Instance.new("UIScale")
+                sc.Parent = b
+                b.MouseEnter:Connect(function() tw(sc, 0.4, { Scale = 1.05 }, Enum.EasingStyle.Back) end)
+                b.MouseLeave:Connect(function() tw(sc, 0.45, { Scale = 1 }, Enum.EasingStyle.Back) end)
+                b.InputBegan:Connect(function(io) if isPress(io) then tw(sc, 0.1, { Scale = 0.94 }); ripple(b, io, fitS.Scale) end end)
+                b.InputEnded:Connect(function(io) if isPress(io) then tw(sc, 0.45, { Scale = 1 }, Enum.EasingStyle.Back) end end)
+                b.Activated:Connect(onClick)
+                return b, t
+            end
+
+            local function newPage(visible)
+                local f = Instance.new("Frame")
+                f.Size = UDim2.fromScale(1, 1)
+                f.BackgroundTransparency = 1
+                f.BorderSizePixel = 0
+                f.Visible = visible
+                f.Parent = stage
+                return f
+            end
+            local pg1 = newPage(true)
+            local pg2 = newPage(false)
+            local function showPage(n)
+                pg1.Visible = n == 1
+                pg2.Visible = n == 2
+                local pg = (n == 1) and pg1 or pg2
+                pg.Position = UDim2.fromOffset(28, 0)
+                tw(pg, 0.4, { Position = UDim2.fromOffset(0, 0) })
+            end
+
+            local function goStart()
+                if starting then return end
+                starting = true
+                alive = false
+                vpConn:Disconnect()
+                tw(gblur, 0.6, { Size = 0 }, Enum.EasingStyle.Sine)
+                task.delay(0.7, function() gblur:Destroy() end)
+                showLoader()   -- the loading screen fades in on top (higher DisplayOrder)
+                task.delay(0.8, function() if g.Parent then g:Destroy() end end)
+            end
+
+            -- ===== page 1: START / JOIN DISCORD / VIEW STATS =====
+            local title = lbl(pg1, "V R   H A N D S", 0, 56, 520, 44, 34, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+            grad(title, C(255, 255, 255), C(190, 150, 255), 0)
+            lbl(pg1, "No-VR  |  Edited by @N4THAFTER", 0, 104, 520, 18, 12, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+            lbl(pg1, "v" .. SCRIPT_VERSION, 0, 124, 520, 16, 11, MUTED, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+
+            mkBtn(pg1, 110, 172, 300, 62, "START", "start", goStart)
+            local dcT
+            local _, t2 = mkBtn(pg1, 110, 246, 300, 52, "JOIN DISCORD", "discord", function()
+                dcT.Text = joinDiscord()
+                task.delay(2.2, function() if dcT.Parent then dcT.Text = "JOIN DISCORD" end end)
+            end)
+            dcT = t2
+            mkBtn(pg1, 110, 310, 300, 52, "VIEW STATS", "glass", function() showPage(2) end)
+            lbl(pg1, "discord.gg/mgmgJ7rZUa", 0, 382, 520, 16, 11, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+
+            -- ===== page 2: live stats =====
+            local COLS = { ok = GREEN, warn = C(255, 205, 110), bad = C(255, 110, 120) }
+            lbl(pg2, "LIVE STATS", 24, 10, 300, 28, 22, WHITE, Enum.Font.GothamBlack)
+            local updL = lbl(pg2, "Loading...", 24, 40, 472, 16, 11, MUTED, Enum.Font.GothamMedium)
+
+            local sc = Instance.new("ScrollingFrame")
+            sc.Position = UDim2.fromOffset(16, 64)
+            sc.Size = UDim2.fromOffset(488, 330)
+            sc.BackgroundTransparency = 1
+            sc.BorderSizePixel = 0
+            sc.ScrollBarThickness = 4
+            sc.CanvasSize = UDim2.new()
+            sc.AutomaticCanvasSize = Enum.AutomaticSize.Y
+            sc.ScrollingDirection = Enum.ScrollingDirection.Y
+            sc.Parent = pg2
+            local ll = Instance.new("UIListLayout")
+            ll.Padding = UDim.new(0, 4)
+            ll.SortOrder = Enum.SortOrder.LayoutOrder
+            ll.Parent = sc
+
+            local rowN = 0
+            local function section(text)
+                rowN = rowN + 1
+                local f = Instance.new("Frame")
+                f.LayoutOrder = rowN
+                f.Size = UDim2.new(1, -8, 0, 22)
+                f.BackgroundTransparency = 1
+                f.Parent = sc
+                lbl(f, text, 4, 4, 300, 16, 11, MUTED)
+            end
+            local function row(label, text, state)
+                rowN = rowN + 1
+                local f = Instance.new("Frame")
+                f.LayoutOrder = rowN
+                f.Size = UDim2.new(1, -8, 0, 30)
+                f.BackgroundColor3 = Color3.new(1, 1, 1)
+                f.BackgroundTransparency = 0.86
+                f.BorderSizePixel = 0
+                f.Parent = sc
+                corner(f, 8)
+                local dot = Instance.new("Frame")
+                dot.Position = UDim2.fromOffset(10, 11)
+                dot.Size = UDim2.fromOffset(8, 8)
+                dot.BackgroundTransparency = 1
+                dot.BorderSizePixel = 0
+                dot.Parent = f
+                corner(dot, 4)
+                dot:SetAttribute("tc", true)
+                local nameL = lbl(f, label, 26, 0, 150, 30, 12, WHITE)
+                local val = lbl(f, "", 170, 0, 296, 30, 12, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Right)
+                val:SetAttribute("tc", true)
+                local r = {}
+                function r.set(t, st)
+                    if not val.Parent then return end
+                    val.Text = tostring(t)
+                    local c = st and COLS[st]
+                    val.TextColor3 = c or MUTED
+                    dot.BackgroundTransparency = c and 0 or 1
+                    if c then dot.BackgroundColor3 = c end
+                end
+                function r.label(t) nameL.Text = t end
+                function r.show(v) f.Visible = v end
+                r.set(text or "...", state)
+                return r
+            end
+
+            local R = {}
+            section("DISCORD SERVER  (live)")
+            R.dcName    = row("Server", "checking...")
+            R.dcMembers = row("Members", "checking...")
+            R.dcOnline  = row("Online now", "checking...")
+
+            section("DISCORD ROLES  (live)")
+            R.role   = row("Your role", "checking...")
+            R.linked = row("Linked members", "checking...")
+            R.slots = {}
+            for i = 1, 6 do
+                R.slots[i] = row("-", "")
+                R.slots[i].show(false)
+            end
+
+            section("ROBLOX  (live)")
+            R.rLocal = row("Your client", "checking...")
+            R.rLive  = row("Latest client", "checking...")
+            R.rHash  = row("Version hash", "checking...")
+            R.rBuild = row("Build match", "checking...")
+
+            section("BANWAVE & DETECTION  (live)")
+            R.ban = row("Banwave", "checking...")
+            R.det = row("Detection", "checking...")
+            R.key = row("Key system", "checking...")
+            R.msg = row("Notice", "-")
+
+            section("SCRIPT  (live)")
+            R.ver    = row("Script version", SCRIPT_VERSION)
+            R.latest = row("Latest version", "checking...")
+            R.sstat  = row("Script status", "checking...")
+            R.au     = row("Auto-update", "-")
+
+            section("DEVICE")
+            local platName, platBinary = devicePlatform()
+            row("Platform", platName)
+            local execText = "unknown"
+            do
+                local okx, a, b = pcall(function() return identifyexecutor() end)
+                if okx and a then execText = tostring(a) .. (b and (" " .. tostring(b)) or "") end
+            end
+            row("Executor", execText)
+
+            mkBtn(pg2, 16, 406, 150, 46, "BACK", "glass", function() showPage(1) end)
+            mkBtn(pg2, 344, 406, 160, 46, "START", "start", goStart)
+
+            -- ===== fill the rows from freshly fetched data =====
+            local function applyStats(d)
+                local hasStatusUrl = type(STATUS_URL) == "string" and STATUS_URL ~= ""
+                local hasRolesUrl  = type(ROLES_URL) == "string" and ROLES_URL ~= ""
+                local st = d.status
+
+                -- discord server
+                local dc = d.discord
+                if dc and type(dc.guild) == "table" then
+                    R.dcName.set(tostring(dc.guild.name or "?"), "ok")
+                    R.dcMembers.set(fmtN(dc.approximate_member_count), nil)
+                    R.dcOnline.set(fmtN(dc.approximate_presence_count), "ok")
+                elseif dc and dc.code == 10006 then
+                    R.dcName.set("Invite invalid / expired", "bad")
+                    R.dcMembers.set("-", nil)
+                    R.dcOnline.set("-", nil)
+                else
+                    R.dcName.set("Unavailable", "warn")
+                    R.dcMembers.set("Unavailable", "warn")
+                    R.dcOnline.set("Unavailable", "warn")
+                end
+
+                -- discord roles
+                for i = 1, #R.slots do R.slots[i].show(false) end
+                if not hasRolesUrl then
+                    R.role.set("Not configured", nil)
+                    R.linked.set("-", nil)
+                elseif d.roles then
+                    local mine = d.roles[tostring(lp.UserId)]
+                    if type(mine) == "table" then mine = mine.role end
+                    local found = type(mine) == "string" and mine ~= ""
+                    local mineText = found and mine or "No role (not linked)"
+                    R.role.set(mineText, found and "ok" or nil)
+
+                    local counts, total = {}, 0
+                    for _, v in pairs(d.roles) do
+                        if type(v) == "table" then v = v.role end
+                        if type(v) == "string" and v ~= "" then
+                            counts[v] = (counts[v] or 0) + 1
+                            total = total + 1
+                        end
+                    end
+                    R.linked.set(fmtN(total), nil)
+                    local list = {}
+                    for name, n in pairs(counts) do list[#list + 1] = { name = name, n = n } end
+                    table.sort(list, function(a, b)
+                        if a.n ~= b.n then return a.n > b.n end
+                        return a.name < b.name
+                    end)
+                    for i = 1, math.min(#list, #R.slots) do
+                        R.slots[i].label(list[i].name)
+                        R.slots[i].set(fmtN(list[i].n) .. (list[i].n == 1 and " member" or " members"), nil)
+                        R.slots[i].show(true)
+                    end
+                    -- keep the profile card / profile tab in step
+                    roleState.done, roleState.text, roleState.found, roleState.at = true, mineText, found, os.clock()
+                else
+                    R.role.set("Unavailable", "warn")
+                    R.linked.set("Unavailable", "warn")
+                end
+
+                -- roblox
+                local localVer
+                pcall(function() localVer = version() end)
+                R.rLocal.set(localVer and tostring(localVer) or "unknown", (not localVer) and "warn" or nil)
+                local live = d.live
+                if live and live.clientVersionUpload then
+                    R.rLive.set(tostring(live.version or "?"), "ok")
+                    R.rHash.set(tostring(live.clientVersionUpload), "ok")
+                    if localVer and live.version then
+                        if tostring(localVer) == tostring(live.version) then
+                            R.rBuild.set("Up to date", "ok")
+                        else
+                            R.rBuild.set("Different from live", "warn")
+                        end
+                    else
+                        R.rBuild.set("Can't compare", "warn")
+                    end
+                else
+                    R.rLive.set("Unavailable", "warn")
+                    R.rHash.set("Unavailable", "warn")
+                    R.rBuild.set("Unavailable", "warn")
+                end
+
+                -- banwave / detection / key system
+                if not hasStatusUrl then
+                    R.ban.set("Not configured", nil)
+                    R.det.set("Not configured", nil)
+                    R.key.set("Unknown", nil)
+                    R.msg.set("Set STATUS_URL to enable", nil)
+                elseif not st then
+                    R.ban.set("Status file unreachable", "warn")
+                    R.det.set("Status file unreachable", "warn")
+                    R.key.set("Status file unreachable", "warn")
+                    R.msg.set("-", nil)
+                else
+                    local b = string.lower(tostring(st.banwave or ""))
+                    local note = st.banwave_note and (" - " .. tostring(st.banwave_note)) or ""
+                    if b == "clear" then R.ban.set("Clear" .. note, "ok")
+                    elseif b == "warning" then R.ban.set("Warning" .. note, "warn")
+                    elseif b == "active" then R.ban.set("ACTIVE" .. note, "bad")
+                    else R.ban.set("Unknown", nil) end
+
+                    local dt, ds = detectionOf(st)
+                    R.det.set(dt, ds)
+
+                    local k = string.lower(tostring(st.key_system or ""))
+                    if k == "online" then R.key.set("Online", "ok")
+                    elseif k == "degraded" then R.key.set("Degraded", "warn")
+                    elseif k == "offline" then R.key.set("Offline", "bad")
+                    elseif k == "none" then R.key.set("Not used", nil)
+                    else R.key.set("Unknown", nil) end
+
+                    R.msg.set(st.message and tostring(st.message) or "-", nil)
+                end
+
+                -- script
+                local latest = (st and st.version and tostring(st.version)) or AU.latest
+                local sState, sText
+                if latest then
+                    if latest == SCRIPT_VERSION then
+                        R.latest.set(latest, "ok")
+                        sState, sText = "ok", "Up to date"
+                    else
+                        R.latest.set(latest, "warn")
+                        sState, sText = "warn", "Update available"
+                    end
+                else
+                    R.latest.set("Unavailable", "warn")
+                    sState, sText = "warn", "Can't check for updates"
+                end
+                local ov = st and string.lower(tostring(st.script or "")) or ""
+                if ov == "working" then sState, sText = "ok", "Working"
+                elseif ov == "updating" then sState, sText = "warn", "Updating"
+                elseif ov == "patched" then sState, sText = "bad", "Patched" end
+                R.sstat.set(sText, sState)
+                R.au.set(AU.text, AU.level)
+            end
+
+            -- ===== live loop: refresh every STATS_EVERY seconds until the screen closes =====
+            task.spawn(function()
+                while alive and g.Parent do
+                    local t0 = os.clock()
+                    local d = collectStats(platBinary)
+                    if not (alive and g.Parent) then break end
+                    local okA, eA = pcall(applyStats, d)
+                    if not okA then warn("[NoVR] stats failed: " .. tostring(eA)) end
+                    local stamp = os.date("%H:%M:%S")
+                    local rest = math.max(STATS_EVERY - (os.clock() - t0), 1)
+                    local t1 = os.clock()
+                    while alive and g.Parent and os.clock() - t1 < rest do
+                        updL.Text = "Updated " .. stamp .. "   |   refreshes every " .. STATS_EVERY
+                            .. "s   |   next in " .. math.ceil(rest - (os.clock() - t1)) .. "s"
+                        task.wait(0.25)
+                    end
+                end
+            end)
+
+            Theme.recolor(g)
+        end
+        -- ====================================================================
+
         hudApi.openStart = openStart
         hudApi.closeStart = closeStart
 
@@ -5461,7 +5959,20 @@ task.spawn(function()
             end
         end)
 
-        showLoader()   -- loading screen, then the start menu opens
+        -- welcome screen first; START leads into the loading screen. If it fails to build, go straight to loading.
+        do
+            local okG, eG = pcall(showGate)
+            if not okG then
+                warn("[NoVR] welcome screen failed: " .. tostring(eG))
+                pcall(function()
+                    local og = lp.PlayerGui:FindFirstChild("NoVR_Gate")
+                    if og then og:Destroy() end
+                    local ob = Lighting:FindFirstChild("NoVR_GateBlur")
+                    if ob then ob:Destroy() end
+                end)
+                showLoader()
+            end
+        end
     end
 
     print("[NoVR] control active.")
