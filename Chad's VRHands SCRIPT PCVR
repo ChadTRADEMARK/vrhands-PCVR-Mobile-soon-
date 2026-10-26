@@ -3034,10 +3034,12 @@ task.spawn(function()
 
         -- Copies the invite, then asks the local Discord app to open it (falls back to the browser).
         -- Returns the text the button should flash.
-        local function joinDiscord()
+        local function joinDiscord(inviteUrl, inviteCode)
+            inviteUrl = inviteUrl or DISCORD_INVITE
+            inviteCode = inviteCode or DISCORD_CODE
             local clip = setclipboard or toclipboard or (Clipboard and Clipboard.set)
             local copied = false
-            if clip then copied = pcall(clip, DISCORD_INVITE) end
+            if clip then copied = pcall(clip, inviteUrl) end
             task.spawn(function()
                 local opened = false
                 local req = (syn and syn.request) or http_request or request or (fluxus and fluxus.request)
@@ -3048,17 +3050,17 @@ task.spawn(function()
                         Headers = { ["Content-Type"] = "application/json", ["Origin"] = "https://discord.com" },
                         Body = HttpSvcD:JSONEncode({
                             cmd = "INVITE_BROWSER",
-                            args = { code = DISCORD_CODE },
+                            args = { code = inviteCode },
                             nonce = HttpSvcD:GenerateGUID(false),
                         }),
                     })
                     if ok and res and (res.Success or res.StatusCode == 200) then opened = true end
                 end
                 if not opened then
-                    pcall(function() game:GetService("GuiService"):OpenBrowserWindow(DISCORD_INVITE) end)
+                    pcall(function() game:GetService("GuiService"):OpenBrowserWindow(inviteUrl) end)
                 end
             end)
-            return copied and "INVITE COPIED!" or "discord.gg/mgmgJ7rZUa"
+            return copied and "INVITE COPIED!" or (inviteUrl:gsub("^https?://", ""))
         end
 
         -- Role lookup: reads ROLES_URL once and remembers the answer (retries if it was unreachable).
@@ -5503,6 +5505,35 @@ task.spawn(function()
             return d
         end
 
+        -- ---- optional extra loader (M7): chosen with YES / NO on the welcome screen ----
+        local M7_URL  = "https://mois7.xyz/loader"
+        local M7_FILE = "NoVR_M7.txt"   -- remembers the last choice on this computer (needs writefile)
+        local function readM7()
+            local ok, v = pcall(function() return isfile and isfile(M7_FILE) and readfile(M7_FILE) end)
+            return ok and v == "yes"
+        end
+        local function saveM7(on)
+            pcall(function() if writefile then writefile(M7_FILE, on and "yes" or "no") end end)
+        end
+        -- same as: loadstring(game:HttpGet("https://mois7.xyz/loader"))()   (runs once per session)
+        local function runM7()
+            if _G.NoVR_M7Ran then return end
+            _G.NoVR_M7Ran = true
+            task.spawn(function()
+                local okG, src = pcall(function() return game:HttpGet(M7_URL) end)
+                if not (okG and type(src) == "string" and #src > 0) then src = rawGet(M7_URL) end
+                if not src then
+                    warn("[NoVR] M7: could not download the loader")
+                    _G.NoVR_M7Ran = nil
+                    return
+                end
+                local fn, err = (EXEC.loadstring or loadstring or load)(src)
+                if not fn then warn("[NoVR] M7: loader has an error: " .. tostring(err)) return end
+                local ok, e = pcall(fn)
+                if ok then print("[NoVR] M7 loaded") else warn("[NoVR] M7 failed: " .. tostring(e)) end
+            end)
+        end
+
         local function showGate()
             loaderActive = true
             S.menuOpen = true
@@ -5556,6 +5587,7 @@ task.spawn(function()
 
             local alive = true
             local starting = false
+            local m7On = readM7()   -- default NO
 
             -- ===== buttons =====
             local function mkBtn(parent, x, y, w, h, text, kind, onClick)
@@ -5613,6 +5645,7 @@ task.spawn(function()
                 starting = true
                 alive = false
                 vpConn:Disconnect()
+                if m7On then runM7() end   -- starts together with the loading screen
                 tw(gblur, 0.6, { Size = 0 }, Enum.EasingStyle.Sine)
                 task.delay(0.7, function() gblur:Destroy() end)
                 showLoader()   -- the loading screen fades in on top (higher DisplayOrder)
@@ -5625,15 +5658,71 @@ task.spawn(function()
             lbl(pg1, "No-VR  |  Edited by @N4THAFTER", 0, 104, 520, 18, 12, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
             lbl(pg1, "v" .. SCRIPT_VERSION, 0, 124, 520, 16, 11, MUTED, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
 
-            mkBtn(pg1, 110, 172, 300, 62, "START", "start", goStart)
+            mkBtn(pg1, 110, 156, 300, 58, "START", "start", goStart)
             local dcT
-            local _, t2 = mkBtn(pg1, 110, 246, 300, 52, "JOIN DISCORD", "discord", function()
+            local _, t2 = mkBtn(pg1, 110, 224, 300, 44, "JOIN DISCORD", "discord", function()
                 dcT.Text = joinDiscord()
                 task.delay(2.2, function() if dcT.Parent then dcT.Text = "JOIN DISCORD" end end)
             end)
             dcT = t2
-            mkBtn(pg1, 110, 310, 300, 52, "VIEW STATS", "glass", function() showPage(2) end)
-            lbl(pg1, "discord.gg/mgmgJ7rZUa", 0, 382, 520, 16, 11, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+            -- credits: Mois7 admin developers' Discord
+            local m7dT
+            local _, t3 = mkBtn(pg1, 110, 276, 300, 44, "MOIS7 DISCORD", "discord", function()
+                m7dT.Text = joinDiscord("https://discord.gg/dQ9NjDNmM", "dQ9NjDNmM")
+                task.delay(2.2, function() if m7dT.Parent then m7dT.Text = "MOIS7 DISCORD" end end)
+            end)
+            m7dT = t3
+            local credit = lbl(pg1, "Credits to Mois7 Admin developers, Here is their discord link!", 70, 322, 380, 30, 11, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+            credit.TextWrapped = true
+            credit.TextTruncate = Enum.TextTruncate.None
+            credit.TextYAlignment = Enum.TextYAlignment.Top
+            mkBtn(pg1, 110, 356, 300, 44, "VIEW STATS", "glass", function() showPage(2) end)
+            -- load M7 together with this script?  [NO] [YES]
+            lbl(pg1, "Load M7 with this script?", 0, 410, 520, 16, 12, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+            local choices = {}
+            local function paintChoices()
+                for val, c in pairs(choices) do
+                    local on = (val == m7On)
+                    tw(c.sel, 0.25, { BackgroundTransparency = on and 0 or 1 })
+                end
+            end
+            local function mkChoice(x, text, val)
+                local b = Instance.new("TextButton")
+                b.Position = UDim2.fromOffset(x, 430)
+                b.Size = UDim2.fromOffset(146, 32)
+                b.AutoButtonColor = false
+                b.BackgroundColor3 = Color3.new(1, 1, 1)
+                b.BackgroundTransparency = 0.86
+                b.BorderSizePixel = 0
+                b.Text = ""
+                b.Parent = pg1
+                corner(b, 10)
+                stroke(b, C(215, 185, 255), 1.5, 0.4)
+                local sel = Instance.new("Frame")   -- gradient fill shown on the chosen option
+                sel.Size = UDim2.fromScale(1, 1)
+                sel.BackgroundColor3 = Color3.new(1, 1, 1)
+                sel.BackgroundTransparency = (val == m7On) and 0 or 1
+                sel.BorderSizePixel = 0
+                sel.Active = false
+                sel.Parent = b
+                corner(sel, 10)
+                grad(sel, PINK, VIOLET, 0)
+                lbl(b, text, 0, 0, 146, 32, 14, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+                local sc2 = Instance.new("UIScale")
+                sc2.Parent = b
+                b.MouseEnter:Connect(function() tw(sc2, 0.4, { Scale = 1.05 }, Enum.EasingStyle.Back) end)
+                b.MouseLeave:Connect(function() tw(sc2, 0.45, { Scale = 1 }, Enum.EasingStyle.Back) end)
+                b.InputBegan:Connect(function(io) if isPress(io) then tw(sc2, 0.1, { Scale = 0.94 }); ripple(b, io, fitS.Scale) end end)
+                b.InputEnded:Connect(function(io) if isPress(io) then tw(sc2, 0.45, { Scale = 1 }, Enum.EasingStyle.Back) end end)
+                b.Activated:Connect(function()
+                    m7On = val
+                    saveM7(val)
+                    paintChoices()
+                end)
+                choices[val] = { sel = sel }
+            end
+            mkChoice(110, "NO", false)
+            mkChoice(264, "YES", true)
 
             -- ===== page 2: live stats =====
             local COLS = { ok = GREEN, warn = C(255, 205, 110), bad = C(255, 110, 120) }
