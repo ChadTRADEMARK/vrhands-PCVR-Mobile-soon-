@@ -52,8 +52,9 @@ local SCRIPT_VERSION = "1.0.0"
 -- Leave "" to skip. Example file:
 --   { "banwave": "clear", "banwave_note": "No wave reported",
 --     "key_system": "online", "script": "working", "message": "All good" }
--- banwave: clear | warning | active    key_system: online | offline | none    script: working | updating | patched
-local STATUS_URL = ""
+-- banwave: clear | warning | active    key_system: online | degraded | offline | none    script: working | updating | patched
+-- (status_feed_patch.js makes your bot write + publish this file for you.)
+local STATUS_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR-Mobile-soon-/refs/heads/main/status.json"
 -- Auto-update: while the script runs it re-checks UPDATE_URL. When the file on GitHub changes
 -- (new SCRIPT_VERSION, or any change to the file) it shows a 5 second countdown, then restarts
 -- itself with the new version. The player can press CANCEL on the countdown.
@@ -4228,7 +4229,10 @@ task.spawn(function()
                             local localVer
                             pcall(function() localVer = version() end)
                             rLocal.set(localVer and tostring(localVer) or "unknown", (not localVer) and "warn" or nil)
-                            local live = getJson("https://clientsettings.roblox.com/v2/client-version/" .. platBinary)
+                            local live = getJson("https://clientsettingscdn.roblox.com/v2/client-version/" .. platBinary)
+                            if not (live and live.clientVersionUpload) then
+                                live = getJson("https://clientsettings.roblox.com/v2/client-version/" .. platBinary)
+                            end
                             if live and live.clientVersionUpload then
                                 rLive.set(tostring(live.version or "?"), "ok")
                                 rHash.set(tostring(live.clientVersionUpload), "ok")
@@ -4270,6 +4274,7 @@ task.spawn(function()
 
                                 local k = string.lower(tostring(remote.key_system or ""))
                                 if k == "online" then rKey.set("Online", "ok")
+                                elseif k == "degraded" then rKey.set("Degraded", "warn")
                                 elseif k == "offline" then rKey.set("Offline", "bad")
                                 elseif k == "none" or k == "" then rKey.set("None (keyless script)", "ok")
                                 else rKey.set(k, nil) end
