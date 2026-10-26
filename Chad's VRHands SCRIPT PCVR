@@ -1,3 +1,7 @@
+-- [[ Rscripts Risk Notice ]]
+-- This script is not verified by rscripts.net. Deal with caution.
+-- [[ End Rscripts Risk Notice ]]
+
 local SHIM = [=[
 -- Executor compatibility layer: finds whichever version of each function this
 -- executor provides, and falls back gracefully when something is missing.
@@ -2536,35 +2540,6 @@ task.spawn(function()
             t.Parent = parent
             return t
         end
-        -- A UIGradient on a TextButton also tints the button's own text, which made the label
-        -- invisible. So the gradient goes on a separate fill frame and the text on its own label.
-        local function gradButton(btn, text, c1, c2, rot, radius, size, font)
-            btn.BackgroundTransparency = 1
-            btn.Text = ""
-            local fill = Instance.new("Frame")
-            fill.Name = "Fill"
-            fill.Size = UDim2.fromScale(1, 1)
-            fill.BackgroundColor3 = Color3.new(1, 1, 1)
-            fill.BorderSizePixel = 0
-            fill.Active = false
-            fill.ZIndex = 1
-            fill.Parent = btn
-            corner(fill, radius)
-            grad(fill, c1, c2, rot)
-            local t = Instance.new("TextLabel")
-            t.Name = "Txt"
-            t.BackgroundTransparency = 1
-            t.Size = UDim2.fromScale(1, 1)
-            t.Text = text
-            t.Font = font
-            t.TextSize = size
-            t.TextColor3 = WHITE
-            t.ZIndex = 3
-            t.Active = false
-            t.Parent = btn
-            return t
-        end
-
         local function isPress(io)
             return io.UserInputType == Enum.UserInputType.Touch or io.UserInputType == Enum.UserInputType.MouseButton1
         end
@@ -2882,8 +2857,6 @@ task.spawn(function()
         -- any change to the file since the first check. Then: countdown toast -> performUpdate().
         _G.NoVR_Gen = (_G.NoVR_Gen or 0) + 1
         local myGen = _G.NoVR_Gen
-        -- what the watcher last did (shown live on the Profile > STATUS tab)
-        local AU = { text = "Starting...", level = nil }
 
         local function promptUpdate(newVer)
             local pg = lp:WaitForChild("PlayerGui")
@@ -2959,53 +2932,28 @@ task.spawn(function()
         end
 
         task.spawn(function()
-            if AUTO_UPDATE ~= true then AU.text, AU.level = "Off", nil return end
-            if type(UPDATE_URL) ~= "string" or UPDATE_URL == "" or string.find(UPDATE_URL, "PUT_YOUR", 1, true) then
-                AU.text, AU.level = "UPDATE_URL not set", "warn"
-                return
-            end
+            if AUTO_UPDATE ~= true then return end
+            if type(UPDATE_URL) ~= "string" or UPDATE_URL == "" or string.find(UPDATE_URL, "PUT_YOUR", 1, true) then return end
             local every = math.max(tonumber(AUTO_UPDATE_SECONDS) or 20, 10)
             local baseline, skipped
-            task.wait(3)
+            task.wait(8)
             while _G.NoVR_Gen == myGen do
-                -- pcall: an error in one check must never end the watcher
-                local okc, errc = pcall(function()
-                    if updating then return end
+                if not updating then
                     local src = fetchSource(UPDATE_URL)
-                    local stamp = os.date("%H:%M:%S")
-                    if not (src and #src > 200) then
-                        AU.text, AU.level = stamp .. " - download failed", "warn"
-                        return
+                    if src and #src > 1000 then
+                        if baseline == nil then baseline = src end
+                        local newVer = src:match('SCRIPT_VERSION%s*=%s*"([%w%.%-]+)"')
+                        local changed = (newVer ~= nil and newVer ~= SCRIPT_VERSION) or (src ~= baseline)
+                        if changed and src ~= skipped then
+                            -- never restart into a broken push
+                            local fn = (EXEC.loadstring or loadstring or load)(src)
+                            if fn then
+                                if not promptUpdate(newVer) then skipped = src end   -- cancelled: don't ask again for this file
+                            else
+                                skipped = src
+                            end
+                        end
                     end
-                    if baseline == nil then baseline = src end
-                    local newVer = src:match('SCRIPT_VERSION%s*=%s*"([%w%.%-]+)"')
-                    local changed = (newVer ~= nil and newVer ~= SCRIPT_VERSION) or (src ~= baseline)
-                    if not changed then
-                        AU.text, AU.level = stamp .. " - up to date", "ok"
-                        return
-                    end
-                    if src == skipped then
-                        AU.text, AU.level = stamp .. " - update skipped", "warn"
-                        return
-                    end
-                    -- never restart into a broken push
-                    local fn = (EXEC.loadstring or loadstring or load)(src)
-                    if not fn then
-                        skipped = src
-                        AU.text, AU.level = stamp .. " - new file has an error", "bad"
-                        warn("[NoVR] auto-update: the new file on GitHub does not compile, not applying it")
-                        return
-                    end
-                    AU.text, AU.level = stamp .. " - update found", "warn"
-                    print("[NoVR] auto-update: change detected" .. (newVer and (" (v" .. newVer .. ")") or ""))
-                    if not promptUpdate(newVer) then
-                        skipped = src   -- cancelled: don't ask again for this file
-                        AU.text, AU.level = stamp .. " - cancelled", "warn"
-                    end
-                end)
-                if not okc then
-                    AU.text, AU.level = "error: " .. string.sub(tostring(errc), 1, 40), "bad"
-                    warn("[NoVR] auto-update check failed: " .. tostring(errc))
                 end
                 task.wait(every)
             end
@@ -4319,7 +4267,8 @@ task.spawn(function()
                     sRow("Script version", SCRIPT_VERSION)
                     local rNew    = sRow("Latest version", "checking...")
                     local rScript = sRow("Script status", "checking...")
-                    local rAU = sRow("Auto-update", AU.text, AU.level)
+                    sRow("Auto-update", AUTO_UPDATE == true and ("On, every " .. math.max(tonumber(AUTO_UPDATE_SECONDS) or 20, 10) .. "s") or "Off",
+                         AUTO_UPDATE == true and "ok" or nil)
                     sRow("Gestures / grab", Input and "Hooked" or "Not found", Input and "ok" or "warn")
                     sRow("Executor", execText)
 
@@ -4481,7 +4430,6 @@ task.spawn(function()
                             local okm, mem = pcall(function() return StatsSvc:GetTotalMemoryUsageMb() end)
                             rMem.set(okm and mem and (math.floor(mem + 0.5) .. " MB") or "-")
                             rPl.set(#Players:GetPlayers() .. " / " .. Players.MaxPlayers)
-                            rAU.set(AU.text, AU.level)
                             local t = math.floor(workspace.DistributedGameTime)
                             rUp.set(string.format("%dh %02dm %02ds", t // 3600, (t % 3600) // 60, t % 60))
 
@@ -4548,17 +4496,21 @@ task.spawn(function()
             dcB.AutoButtonColor = false
             dcB.BackgroundColor3 = Color3.new(1, 1, 1)
             dcB.BorderSizePixel = 0
+            dcB.Text = "JOIN DISCORD"
+            dcB.Font = Enum.Font.GothamBlack
+            dcB.TextSize = 12
+            dcB.TextScaled = true
+            dcB.TextColor3 = WHITE
             dcB.Parent = main
-            corner(dcB, 10)
-            local dcLbl = gradButton(dcB, "JOIN DISCORD", PINK, VIOLET, 0, 10, 13, Enum.Font.GothamBlack)
-            dcLbl.TextScaled = true
             local dcPad = Instance.new("UIPadding")
-            dcPad.PaddingLeft, dcPad.PaddingRight = UDim.new(0, 10), UDim.new(0, 10)
+            dcPad.PaddingLeft, dcPad.PaddingRight = UDim.new(0, 12), UDim.new(0, 12)
             dcPad.PaddingTop, dcPad.PaddingBottom = UDim.new(0, 11), UDim.new(0, 11)
-            dcPad.Parent = dcLbl
+            dcPad.Parent = dcB
             local dcCap = Instance.new("UITextSizeConstraint")
             dcCap.MaxTextSize = 13
-            dcCap.Parent = dcLbl
+            dcCap.Parent = dcB
+            corner(dcB, 10)
+            grad(dcB, PINK, VIOLET, 0)
             stroke(dcB, Color3.new(1, 1, 1), 1.5, 0.2)
             local dcS = Instance.new("UIScale")
             dcS.Parent = dcB
@@ -4567,8 +4519,8 @@ task.spawn(function()
             dcB.InputBegan:Connect(function(io) if isPress(io) then tw(dcS, 0.1, { Scale = 0.94 }); ripple(dcB, io, fit.Scale) end end)
             dcB.InputEnded:Connect(function(io) if isPress(io) then tw(dcS, 0.45, { Scale = 1.05 }, Enum.EasingStyle.Back) end end)
             dcB.Activated:Connect(function()
-                dcLbl.Text = joinDiscord()
-                task.delay(2.2, function() if dcLbl.Parent then dcLbl.Text = "JOIN DISCORD" end end)
+                dcB.Text = joinDiscord()
+                task.delay(2.2, function() if dcB.Parent then dcB.Text = "JOIN DISCORD" end end)
             end)
 
             -- divider between the two columns
@@ -4852,7 +4804,7 @@ task.spawn(function()
             go.TextColor3 = WHITE
             go.Parent = bar
             corner(go, 8)
-            gradButton(go, "START", PINK, VIOLET, 0, 8, 14, Enum.Font.GothamBlack)
+            grad(go, PINK, VIOLET, 0)
             stroke(go, Color3.new(1, 1, 1), 2, 0.1)
             local gsc = Instance.new("UIScale")
             gsc.Parent = go
@@ -5060,7 +5012,7 @@ task.spawn(function()
             upd.TextColor3 = WHITE
             upd.Parent = side
             corner(upd, 10)
-            gradButton(upd, "UPDATE & RESTART", PINK, VIOLET, 0, 10, 13, Enum.Font.GothamBlack)
+            grad(upd, PINK, VIOLET, 0)
             stroke(upd, Color3.new(1, 1, 1), 1.5, 0.2)
             local usc = Instance.new("UIScale")
             usc.Parent = upd
