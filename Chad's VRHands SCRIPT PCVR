@@ -47,7 +47,7 @@ local UPDATE_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR
 -- ==========================================================
 
 -- Shown in Start Menu > Profile > STATUS tab. Bump SCRIPT_VERSION whenever you publish a new version.
-local SCRIPT_VERSION = "1.0.0"
+local SCRIPT_VERSION = "1.12.5"
 -- Optional: RAW link to a small JSON file YOU host. It feeds the Banwave / Key system / Script rows.
 -- Leave "" to skip. Example file:
 --   { "banwave": "clear", "banwave_note": "No wave reported",
@@ -55,6 +55,11 @@ local SCRIPT_VERSION = "1.0.0"
 -- banwave: clear | warning | active    key_system: online | degraded | offline | none    script: working | updating | patched
 -- (status_feed_patch.js makes your bot write + publish this file for you.)
 local STATUS_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR-Mobile-soon-/refs/heads/main/status.json"
+-- Discord roles: a public JSON file mapping a Roblox UserId to a role name, e.g.
+--   { "123456789": "Staff", "987654321": "Premium Member" }
+-- Players not in the file show as "No role (not linked)". Only role names go in this file
+-- (no Discord IDs / usernames). Leave "" to hide roles.
+local ROLES_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR-Mobile-soon-/refs/heads/main/roles.json"
 -- Auto-update: while the script runs it re-checks UPDATE_URL. When the file on GitHub changes
 -- (new SCRIPT_VERSION, or any change to the file) it shows a 5 second countdown, then restarts
 -- itself with the new version. The player can press CANCEL on the countdown.
@@ -99,6 +104,7 @@ local PRELUDE = "local C = (function()\n" .. SHIM .. "\nend)()\n"
     .. "local UPDATE_URL = " .. string.format("%q", UPDATE_URL) .. "\n"
     .. "local SCRIPT_VERSION = " .. string.format("%q", SCRIPT_VERSION) .. "\n"
     .. "local STATUS_URL = " .. string.format("%q", STATUS_URL) .. "\n"
+    .. "local ROLES_URL = " .. string.format("%q", ROLES_URL) .. "\n"
     .. "local AUTO_UPDATE = " .. tostring(AUTO_UPDATE) .. "\n"
     .. "local AUTO_UPDATE_SECONDS = " .. tostring(AUTO_UPDATE_SECONDS) .. "\n"
 
@@ -2954,6 +2960,90 @@ task.spawn(function()
         end)
         -- ==============================================
 
+        -- ============ DISCORD: invite button + player role ============
+        local DISCORD_INVITE = "https://discord.gg/mgmgJ7rZUa"
+        local DISCORD_CODE   = "mgmgJ7rZUa"
+        local HttpSvcD       = game:GetService("HttpService")
+
+        local function rawGet(url)
+            local req = (syn and syn.request) or http_request or request or (fluxus and fluxus.request)
+            if req then
+                local ok, res = pcall(req, { Url = url, Method = "GET", Headers = { ["Cache-Control"] = "no-cache" } })
+                if ok and res and (res.Success or res.StatusCode == 200)
+                   and type(res.Body) == "string" and #res.Body > 0 then
+                    return res.Body
+                end
+            end
+            local ok, body = pcall(function() return game:HttpGet(url, true) end)
+            if ok and type(body) == "string" and #body > 0 then return body end
+            return nil
+        end
+
+        -- Copies the invite, then asks the local Discord app to open it (falls back to the browser).
+        -- Returns the text the button should flash.
+        local function joinDiscord()
+            local clip = setclipboard or toclipboard or (Clipboard and Clipboard.set)
+            local copied = false
+            if clip then copied = pcall(clip, DISCORD_INVITE) end
+            task.spawn(function()
+                local opened = false
+                local req = (syn and syn.request) or http_request or request or (fluxus and fluxus.request)
+                if req then
+                    local ok, res = pcall(req, {
+                        Url = "http://127.0.0.1:6463/rpc?v=1",
+                        Method = "POST",
+                        Headers = { ["Content-Type"] = "application/json", ["Origin"] = "https://discord.com" },
+                        Body = HttpSvcD:JSONEncode({
+                            cmd = "INVITE_BROWSER",
+                            args = { code = DISCORD_CODE },
+                            nonce = HttpSvcD:GenerateGUID(false),
+                        }),
+                    })
+                    if ok and res and (res.Success or res.StatusCode == 200) then opened = true end
+                end
+                if not opened then
+                    pcall(function() game:GetService("GuiService"):OpenBrowserWindow(DISCORD_INVITE) end)
+                end
+            end)
+            return copied and "INVITE COPIED!" or "discord.gg/mgmgJ7rZUa"
+        end
+
+        -- Role lookup: reads ROLES_URL once and remembers the answer (retries if it was unreachable).
+        local roleState = { done = false, text = nil, found = false, busy = false, waiting = {} }
+        local function fetchRole(cb)
+            if roleState.done then cb(roleState.text, roleState.found) return end
+            roleState.waiting[#roleState.waiting + 1] = cb
+            if roleState.busy then return end
+            roleState.busy = true
+            task.spawn(function()
+                local text, found, ok = "Unavailable", false, false
+                if type(ROLES_URL) ~= "string" or ROLES_URL == "" then
+                    text, ok = "Not configured", true
+                else
+                    local body = rawGet(ROLES_URL)
+                    if body then
+                        local okj, data = pcall(HttpSvcD.JSONDecode, HttpSvcD, body)
+                        if okj and type(data) == "table" then
+                            ok = true
+                            local v = data[tostring(lp.UserId)]
+                            if type(v) == "table" then v = v.role end
+                            if type(v) == "string" and v ~= "" then
+                                text, found = v, true
+                            else
+                                text = "No role (not linked)"
+                            end
+                        end
+                    end
+                end
+                if ok then roleState.done, roleState.text, roleState.found = true, text, found end
+                roleState.busy = false
+                local list = roleState.waiting
+                roleState.waiting = {}
+                for _, f in ipairs(list) do pcall(f, text, found) end
+            end)
+        end
+        -- ==============================================================
+
         local function openStart()
             if startGui then return end
             S.menuOpen = true
@@ -3883,6 +3973,8 @@ task.spawn(function()
                 info("Joined (approx.)", created)
                 info("Premium", premium)
                 info("Verified badge", verified)
+                local roleL = info("Discord role", "loading...")
+                fetchRole(function(t) if roleL.Parent then roleL.Text = t end end)
                 local friendsL = info("Friends", "loading...")
                 task.spawn(function()
                     local ok, n = pcall(function()
@@ -4258,7 +4350,7 @@ task.spawn(function()
                             end
                             if type(STATUS_URL) ~= "string" or STATUS_URL == "" then
                                 rBan.set("Not configured", nil)
-                                rKey.set("None (keyless script)", "ok")
+                                rKey.set("Unknown", nil)
                                 rMsg.set("Set STATUS_URL to enable", nil)
                             elseif not remote then
                                 rBan.set("Status file unreachable", "warn")
@@ -4276,7 +4368,7 @@ task.spawn(function()
                                 if k == "online" then rKey.set("Online", "ok")
                                 elseif k == "degraded" then rKey.set("Degraded", "warn")
                                 elseif k == "offline" then rKey.set("Offline", "bad")
-                                elseif k == "none" or k == "" then rKey.set("None (keyless script)", "ok")
+                                elseif k == "none" then rKey.set("Not used", nil)
                                 else rKey.set(k, nil) end
 
                                 rMsg.set(remote.message and tostring(remote.message) or "-", nil)
@@ -4360,7 +4452,7 @@ task.spawn(function()
             -- ===== search pill =====
             local sbox = Instance.new("Frame")
             sbox.Position = UDim2.fromOffset(60, 16)
-            sbox.Size = UDim2.fromOffset(450, 38)
+            sbox.Size = UDim2.fromOffset(330, 38)
             sbox.BackgroundColor3 = Color3.new(1, 1, 1)
             sbox.BackgroundTransparency = 0.82
             sbox.BorderSizePixel = 0
@@ -4370,7 +4462,7 @@ task.spawn(function()
             local tb = Instance.new("TextBox")
             tb.BackgroundTransparency = 1
             tb.Position = UDim2.fromOffset(38, 0)
-            tb.Size = UDim2.fromOffset(400, 38)
+            tb.Size = UDim2.fromOffset(280, 38)
             tb.Text = ""
             tb.PlaceholderText = "Search for controls, poses and settings"
             tb.PlaceholderColor3 = MUTED
@@ -4396,6 +4488,40 @@ task.spawn(function()
             mh.BackgroundColor3 = MUTED
             mh.BorderSizePixel = 0
             mh.Parent = sbox
+
+            -- ===== Discord invite button =====
+            local dcB = Instance.new("TextButton")
+            dcB.Position = UDim2.fromOffset(400, 16)
+            dcB.Size = UDim2.fromOffset(150, 38)
+            dcB.AutoButtonColor = false
+            dcB.BackgroundColor3 = Color3.new(1, 1, 1)
+            dcB.BorderSizePixel = 0
+            dcB.Text = "JOIN DISCORD"
+            dcB.Font = Enum.Font.GothamBlack
+            dcB.TextSize = 12
+            dcB.TextScaled = true
+            dcB.TextColor3 = WHITE
+            dcB.Parent = main
+            local dcPad = Instance.new("UIPadding")
+            dcPad.PaddingLeft, dcPad.PaddingRight = UDim.new(0, 12), UDim.new(0, 12)
+            dcPad.PaddingTop, dcPad.PaddingBottom = UDim.new(0, 11), UDim.new(0, 11)
+            dcPad.Parent = dcB
+            local dcCap = Instance.new("UITextSizeConstraint")
+            dcCap.MaxTextSize = 13
+            dcCap.Parent = dcB
+            corner(dcB, 10)
+            grad(dcB, PINK, VIOLET, 0)
+            stroke(dcB, Color3.new(1, 1, 1), 1.5, 0.2)
+            local dcS = Instance.new("UIScale")
+            dcS.Parent = dcB
+            dcB.MouseEnter:Connect(function() tw(dcS, 0.5, { Scale = 1.05 }, Enum.EasingStyle.Back) end)
+            dcB.MouseLeave:Connect(function() tw(dcS, 0.45, { Scale = 1 }, Enum.EasingStyle.Back) end)
+            dcB.InputBegan:Connect(function(io) if isPress(io) then tw(dcS, 0.1, { Scale = 0.94 }); ripple(dcB, io, fit.Scale) end end)
+            dcB.InputEnded:Connect(function(io) if isPress(io) then tw(dcS, 0.45, { Scale = 1.05 }, Enum.EasingStyle.Back) end end)
+            dcB.Activated:Connect(function()
+                dcB.Text = joinDiscord()
+                task.delay(2.2, function() if dcB.Parent then dcB.Text = "JOIN DISCORD" end end)
+            end)
 
             -- divider between the two columns
             local div = Instance.new("Frame")
@@ -4597,7 +4723,10 @@ task.spawn(function()
             end)
 
             lbl(card, lp.DisplayName, 84, 8, 166, 18, 14)
-            lbl(card, "@" .. lp.Name, 84, 25, 166, 14, 10, MUTED)
+            local atL = lbl(card, "@" .. lp.Name, 84, 25, 166, 14, 10, MUTED)
+            fetchRole(function(t, found)
+                if found and atL.Parent then atL.Text = "@" .. lp.Name .. "  |  " .. t end
+            end)
             local days = lp.AccountAge
             local yrs = days >= 365 and string.format("%.1f yrs", days / 365) or (days .. " days")
             local prem = ""
