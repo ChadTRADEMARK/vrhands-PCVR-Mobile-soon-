@@ -111,6 +111,114 @@ local RunService  = game:GetService("RunService")
 local Players     = game:GetService("Players")
 local identity    = CFrame.identity
 
+-- true on phones / tablets (Delta mobile, Android, iOS). PC keeps every original code path.
+local IS_MOBILE = false
+do
+    local okp, plat = pcall(function() return UIS:GetPlatform() end)
+    local p = okp and tostring(plat) or ""
+    IS_MOBILE = (string.find(p, "Android", 1, true) ~= nil) or (string.find(p, "IOS", 1, true) ~= nil)
+        or (UIS.TouchEnabled and not UIS.KeyboardEnabled and not UIS.MouseEnabled)
+end
+
+-- ============ BOOT STATUS ============
+-- Startup waits for the game to hand out your VR rig, then scans the game's memory. Both can take a while
+-- (or never finish if something is wrong), and nothing else is on screen yet. This small card shows what the
+-- script is waiting for, so "nothing happened" can never be a mystery. It appears only if startup takes more
+-- than 2 seconds, and closes itself when the welcome screen opens.
+local Boot = { text = "Starting...", since = os.clock(), t0 = os.clock(), closed = false, failed = false }
+function Boot.stage(t)
+    Boot.text, Boot.since, Boot.failed = t, os.clock(), false
+    print("[NoVR] " .. t)
+end
+function Boot.fail(t)
+    Boot.text, Boot.failed = t, true
+    warn("[NoVR] " .. t)
+end
+function Boot.close()
+    Boot.closed = true
+end
+task.spawn(function()
+    local gui, status, cardRef
+    local function build()
+        local lpl = Players.LocalPlayer
+        local pg = lpl and lpl:FindFirstChild("PlayerGui")
+        if not pg then return end
+        local old = pg:FindFirstChild("NoVR_Boot")
+        if old then old:Destroy() end
+        gui = Instance.new("ScreenGui")
+        gui.Name = "NoVR_Boot"
+        gui.ResetOnSpawn = false
+        gui.IgnoreGuiInset = true
+        gui.DisplayOrder = 300
+        gui.Parent = pg
+        local card = Instance.new("Frame")
+        card.AnchorPoint = Vector2.new(0.5, 0)
+        card.Position = UDim2.new(0.5, 0, 0, 10)
+        card.Size = UDim2.new(0.92, 0, 0, 92)
+        card.BackgroundColor3 = Color3.fromRGB(30, 16, 76)
+        card.BackgroundTransparency = 0.04
+        card.BorderSizePixel = 0
+        card.Parent = gui
+        local lim = Instance.new("UISizeConstraint")
+        lim.MaxSize = Vector2.new(440, 200)
+        lim.Parent = card
+        local cr = Instance.new("UICorner")
+        cr.CornerRadius = UDim.new(0, 12)
+        cr.Parent = card
+        local st = Instance.new("UIStroke")
+        st.Color = Color3.fromRGB(215, 185, 255)
+        st.Thickness = 1.5
+        st.Transparency = 0.3
+        st.Parent = card
+        local title = Instance.new("TextLabel")
+        title.BackgroundTransparency = 1
+        title.Position = UDim2.fromOffset(12, 6)
+        title.Size = UDim2.new(1, -56, 0, 18)
+        title.Text = "VR HANDS  v" .. tostring(SCRIPT_VERSION) .. "  -  " .. (IS_MOBILE and "mobile" or "PC")
+        title.Font = Enum.Font.GothamBold
+        title.TextSize = 13
+        title.TextColor3 = Color3.fromRGB(196, 184, 240)
+        title.TextXAlignment = Enum.TextXAlignment.Left
+        title.Parent = card
+        status = Instance.new("TextLabel")
+        status.BackgroundTransparency = 1
+        status.Position = UDim2.fromOffset(12, 26)
+        status.Size = UDim2.new(1, -24, 1, -32)
+        status.Text = ""
+        status.Font = Enum.Font.GothamMedium
+        status.TextSize = 13
+        status.TextColor3 = Color3.new(1, 1, 1)
+        status.TextWrapped = true
+        status.TextXAlignment = Enum.TextXAlignment.Left
+        status.TextYAlignment = Enum.TextYAlignment.Top
+        status.Parent = card
+        local x = Instance.new("TextButton")
+        x.AnchorPoint = Vector2.new(1, 0)
+        x.Position = UDim2.new(1, -8, 0, 4)
+        x.Size = UDim2.fromOffset(30, 22)
+        x.BackgroundTransparency = 1
+        x.Text = "X"
+        x.Font = Enum.Font.GothamBold
+        x.TextSize = 14
+        x.TextColor3 = Color3.fromRGB(196, 184, 240)
+        x.Parent = card
+        x.Activated:Connect(function() Boot.closed = true end)
+    end
+    while not Boot.closed do
+        if not (gui and gui.Parent) then
+            if Boot.failed or os.clock() - Boot.t0 > 2 then pcall(build) end
+        end
+        if status and status.Parent then
+            local secs = math.floor(os.clock() - Boot.since)
+            status.Text = Boot.text .. (Boot.failed and "" or ("  (" .. secs .. "s)"))
+            status.TextColor3 = Boot.failed and Color3.fromRGB(255, 130, 140) or Color3.new(1, 1, 1)
+        end
+        task.wait(0.5)
+    end
+    if gui then gui:Destroy() end
+end)
+-- =====================================
+
 -- ============ THEME ENGINE (menu colour + size) ============
 -- hue : how far the menu colours are rotated away from the default violet (degrees)
 -- size: multiplier for the menus (0.6 .. 1.4)
@@ -274,10 +382,21 @@ task.spawn(function()
     while not lp do task.wait() lp = Players.LocalPlayer end
     local uid = tostring(lp.UserId)
 
+    Boot.stage("Waiting for the game to set up VR (workspace.VRPlayers)...")
     local vrPlayers = workspace:WaitForChild("VRPlayers", 60)
-    if not vrPlayers then warn("[NoVR] no VRPlayers") return end
+    if not vrPlayers then
+        Boot.fail("The game never created VRPlayers, so it doesn't treat you as a VR player. The script has to be running BEFORE the game starts: it rejoins once to do that. "
+            .. (EXEC.queue and "If nothing came back after the rejoin, this executor did not re-run the queued script."
+                or "This executor has no queue_on_teleport, so it cannot rejoin by itself."))
+        return
+    end
+    Boot.stage("Waiting for the server to issue your VR rig...")
     local rig = vrPlayers:WaitForChild(uid, 60)
-    if not rig then warn("[NoVR] The server did not issue a rig") return end
+    if not rig then
+        Boot.fail("The server did not issue a VR rig for you (60s). Rejoin the game and run the script again.")
+        return
+    end
+    Boot.stage("Loading VR hands...")
     rig:WaitForChild("VRHead", 20)
     rig:WaitForChild("LeftHand", 20)
     rig:WaitForChild("RightHand", 20)
@@ -356,25 +475,72 @@ task.spawn(function()
     end
 
     local vrm, Input
-    for _ = 1, (C.getgc and 250 or 0) do
-        for _, o in pairs(C.getgc and C.getgc(true) or {}) do
-            if type(o) == "table"
-               and rawget(o,"HeadsetPart") ~= nil and rawget(o,"Input") ~= nil
-               and rawget(o,"CharacterScale") ~= nil and rawget(o,"DataManager") ~= nil then
-                vrm = o; Input = rawget(o,"Input"); break
+    Boot.stage("Scanning the game for VR input...")
+
+    -- one pass over the game's objects (the old code did two). A VR module table wins over the bare input table.
+    local function scanOnce()
+        local okg, list = pcall(function() return C.getgc and C.getgc(true) end)
+        if not okg or type(list) ~= "table" then return end
+        local fallback
+        for _, o in pairs(list) do
+            if type(o) == "table" then
+                if rawget(o,"HeadsetPart") ~= nil and rawget(o,"Input") ~= nil
+                   and rawget(o,"CharacterScale") ~= nil and rawget(o,"DataManager") ~= nil then
+                    vrm = o; Input = rawget(o,"Input")
+                    return
+                elseif not fallback and rawget(o,"directionLateral") ~= nil
+                   and rawget(o,"rFist") ~= nil and rawget(o,"turnDirection") ~= nil then
+                    fallback = o
+                end
             end
         end
-        if Input then break end
-        for _, o in pairs(C.getgc and C.getgc(true) or {}) do
-            if type(o) == "table" and rawget(o,"directionLateral") ~= nil
-               and rawget(o,"rFist") ~= nil and rawget(o,"turnDirection") ~= nil then
-                Input = o; break
-            end
-        end
-        if Input then break end
-        task.wait(0.1)
+        if fallback then Input = fallback end
     end
-    if not Input then warn("[NoVR] Input object not found - gestures will not work") end
+
+    local function patchGrab()
+        pcall(function()
+            local pmMT = C.getrawmetatable(vrm.PropManager)
+            if pmMT and rawget(pmMT, "GetBestGrabPartInRadius") then
+                local orig = pmMT.GetBestGrabPartInRadius
+                C.setreadonly(pmMT, false)
+                pmMT.GetBestGrabPartInRadius = function(self, root, prox, radius, scale, ...)
+                    return orig(self, root, prox, (radius or 0) * 3.5, scale, ...)
+                end
+                C.setreadonly(pmMT, true)
+            end
+            local cmMT = C.getrawmetatable(vrm.CharacterManager)
+            if cmMT and rawget(cmMT, "GetClosestCharacterInRadius") then
+                local orig = cmMT.GetClosestCharacterInRadius
+                C.setreadonly(cmMT, false)
+                cmMT.GetClosestCharacterInRadius = function(self, pos, radius, ...)
+                    return orig(self, pos, (radius or 0) * 3.5, ...)
+                end
+                C.setreadonly(cmMT, true)
+            end
+        end)
+    end
+
+    local scanning = true
+    local function scanLoop()
+        -- PC: exactly as before (up to 250 rounds). Phones: a scan can freeze the game for seconds, so give up after ~25 s.
+        local deadline = IS_MOBILE and (os.clock() + 25) or math.huge
+        for _ = 1, (C.getgc and 250 or 0) do
+            scanOnce()
+            if Input then break end
+            if os.clock() > deadline then break end
+            task.wait(IS_MOBILE and 0.4 or 0.1)   -- phones get longer gaps so the game / menus can run between scans
+        end
+        if not Input then warn("[NoVR] Input object not found - gestures will not work") end
+        patchGrab()
+        scanning = false
+    end
+    if IS_MOBILE then
+        local t = os.clock()
+        task.spawn(scanLoop)   -- the menus don't wait for it; gestures switch on as soon as it finds the input
+        while scanning and os.clock() - t < 3 do task.wait(0.1) end
+    else
+        scanLoop()
+    end
 
     task.spawn(function()
         for _ = 1, 100 do
@@ -382,27 +548,7 @@ task.spawn(function()
             task.wait(0.1)
         end
     end)
-
-    pcall(function()
-        local pmMT = C.getrawmetatable(vrm.PropManager)
-        if pmMT and rawget(pmMT, "GetBestGrabPartInRadius") then
-            local orig = pmMT.GetBestGrabPartInRadius
-            C.setreadonly(pmMT, false)
-            pmMT.GetBestGrabPartInRadius = function(self, root, prox, radius, scale, ...)
-                return orig(self, root, prox, (radius or 0) * 3.5, scale, ...)
-            end
-            C.setreadonly(pmMT, true)
-        end
-        local cmMT = C.getrawmetatable(vrm.CharacterManager)
-        if cmMT and rawget(cmMT, "GetClosestCharacterInRadius") then
-            local orig = cmMT.GetClosestCharacterInRadius
-            C.setreadonly(cmMT, false)
-            cmMT.GetClosestCharacterInRadius = function(self, pos, radius, ...)
-                return orig(self, pos, (radius or 0) * 3.5, ...)
-            end
-            C.setreadonly(cmMT, true)
-        end
-    end)
+    Boot.stage("Building menus...")
 
     local function setScale(n)
         n = math.clamp(math.floor(n + 0.5), 1, 100)
@@ -2504,14 +2650,7 @@ task.spawn(function()
         local GREEN  = Color3.fromRGB(150, 255, 205)
         local OFFC   = Color3.fromRGB(100, 80, 150)
 
-        -- true on phones / tablets (Delta mobile, Android, iOS). PC keeps every original code path.
-        local IS_MOBILE = false
-        do
-            local okp, plat = pcall(function() return UIS:GetPlatform() end)
-            local p = okp and tostring(plat) or ""
-            IS_MOBILE = (string.find(p, "Android", 1, true) ~= nil) or (string.find(p, "IOS", 1, true) ~= nil)
-                or (UIS.TouchEnabled and not UIS.KeyboardEnabled and not UIS.MouseEnabled)
-        end
+        -- (IS_MOBILE and Boot are defined at the very top of the script)
 
         local function C(r, g, b) return Color3.fromRGB(r, g, b) end
         local function tw(inst, t, props, style, dir)
@@ -2834,7 +2973,7 @@ task.spawn(function()
             end
             local pg = lp:FindFirstChild("PlayerGui")
             if pg then
-                for _, n in ipairs({ "NoVR_Mobile", "NoVR_MobileToggle", "NoVR_HUD", "NoVR_StartToggle", "NoVR_Start", "NoVR_Crosshair", "NoVR_Loader", "NoVR_Gate", "NoVR_UpdateToast" }) do
+                for _, n in ipairs({ "NoVR_Mobile", "NoVR_MobileToggle", "NoVR_HUD", "NoVR_StartToggle", "NoVR_Start", "NoVR_Crosshair", "NoVR_Loader", "NoVR_Gate", "NoVR_Boot", "NoVR_UpdateToast" }) do
                     local o = pg:FindFirstChild(n)
                     if o then o:Destroy() end
                 end
@@ -3056,8 +3195,8 @@ task.spawn(function()
         -- ==============================================
 
         -- ============ DISCORD: invite button + player role ============
-        local DISCORD_INVITE = "https://discord.gg/mgmgJ7rZUa"
-        local DISCORD_CODE   = "mgmgJ7rZUa"
+        local DISCORD_INVITE = "https://discord.gg/R3EvX32MDR"
+        local DISCORD_CODE   = "R3EvX32MDR"
         local HttpSvcD       = game:GetService("HttpService")
 
         local function rawGet(url)
@@ -3076,7 +3215,8 @@ task.spawn(function()
 
         -- Copies the invite, then asks the local Discord app to open it (falls back to the browser).
         -- Returns the text the button should flash.
-        local function joinDiscord(inviteUrl, inviteCode)
+        -- cb(text) is called later if the invite could really be opened (PC with the Discord app running).
+        local function joinDiscord(inviteUrl, inviteCode, cb)
             inviteUrl = inviteUrl or DISCORD_INVITE
             inviteCode = inviteCode or DISCORD_CODE
             local clip = setclipboard or toclipboard or (Clipboard and Clipboard.set)
@@ -3086,19 +3226,31 @@ task.spawn(function()
                 local opened = false
                 local req = (syn and syn.request) or http_request or request or (fluxus and fluxus.request)
                 if req and not IS_MOBILE then
-                    local ok, res = pcall(req, {
-                        Url = "http://127.0.0.1:6463/rpc?v=1",
-                        Method = "POST",
-                        Headers = { ["Content-Type"] = "application/json", ["Origin"] = "https://discord.com" },
-                        Body = HttpSvcD:JSONEncode({
-                            cmd = "INVITE_BROWSER",
-                            args = { code = inviteCode },
-                            nonce = HttpSvcD:GenerateGUID(false),
-                        }),
-                    })
-                    if ok and res and (res.Success or res.StatusCode == 200) then opened = true end
+                    -- the Discord desktop app listens on one of the ports 6463-6472
+                    for port = 6463, 6472 do
+                        local ok, res = pcall(req, {
+                            Url = "http://127.0.0.1:" .. port .. "/rpc?v=1",
+                            Method = "POST",
+                            Headers = { ["Content-Type"] = "application/json", ["Origin"] = "https://discord.com" },
+                            Body = HttpSvcD:JSONEncode({
+                                cmd = "INVITE_BROWSER",
+                                args = { code = inviteCode },
+                                nonce = HttpSvcD:GenerateGUID(false),
+                            }),
+                        })
+                        if ok and type(res) == "table" and (res.Success or res.StatusCode == 200) then
+                            local good = true
+                            if type(res.Body) == "string" then
+                                local okj, data = pcall(HttpSvcD.JSONDecode, HttpSvcD, res.Body)
+                                if okj and type(data) == "table" and data.evt == "ERROR" then good = false end
+                            end
+                            if good then opened = true break end
+                        end
+                    end
                 end
-                if not opened then
+                if opened then
+                    if cb then pcall(cb, "OPENED IN DISCORD!") end
+                else
                     pcall(function() game:GetService("GuiService"):OpenBrowserWindow(inviteUrl) end)
                 end
             end)
@@ -4613,15 +4765,7 @@ task.spawn(function()
             dcB.BorderSizePixel = 0
             dcB.Parent = main
             corner(dcB, 10)
-            local dcLbl = gradButton(dcB, "JOIN DISCORD", PINK, VIOLET, 0, 10, 13, Enum.Font.GothamBlack)
-            dcLbl.TextScaled = true
-            local dcPad = Instance.new("UIPadding")
-            dcPad.PaddingLeft, dcPad.PaddingRight = UDim.new(0, 10), UDim.new(0, 10)
-            dcPad.PaddingTop, dcPad.PaddingBottom = UDim.new(0, 11), UDim.new(0, 11)
-            dcPad.Parent = dcLbl
-            local dcCap = Instance.new("UITextSizeConstraint")
-            dcCap.MaxTextSize = 13
-            dcCap.Parent = dcLbl
+            local dcLbl = gradButton(dcB, "JOIN DISCORD", PINK, VIOLET, 0, 10, 14, Enum.Font.GothamBlack)
             stroke(dcB, Color3.new(1, 1, 1), 1.5, 0.2)
             local dcS = Instance.new("UIScale")
             dcS.Parent = dcB
@@ -4630,8 +4774,8 @@ task.spawn(function()
             dcB.InputBegan:Connect(function(io) if isPress(io) then tw(dcS, 0.1, { Scale = 0.94 }); ripple(dcB, io, fit.Scale) end end)
             dcB.InputEnded:Connect(function(io) if isPress(io) then tw(dcS, 0.45, { Scale = 1.05 }, Enum.EasingStyle.Back) end end)
             dcB.Activated:Connect(function()
-                dcLbl.Text = joinDiscord()
-                task.delay(2.2, function() if dcLbl.Parent then dcLbl.Text = "JOIN DISCORD" end end)
+                dcLbl.Text = joinDiscord(nil, nil, function(t) if dcLbl.Parent then dcLbl.Text = t end end)
+                task.delay(2.4, function() if dcLbl.Parent then dcLbl.Text = "JOIN DISCORD" end end)
             end)
 
             -- divider between the two columns
@@ -5706,8 +5850,8 @@ task.spawn(function()
             mkBtn(pg1, 110, 156, 300, 58, "START", "start", goStart)
             local dcT
             local _, t2 = mkBtn(pg1, 110, 224, 300, 44, "JOIN DISCORD", "discord", function()
-                dcT.Text = joinDiscord()
-                task.delay(2.2, function() if dcT.Parent then dcT.Text = "JOIN DISCORD" end end)
+                dcT.Text = joinDiscord(nil, nil, function(t) if dcT.Parent then dcT.Text = t end end)
+                task.delay(2.4, function() if dcT.Parent then dcT.Text = "JOIN DISCORD" end end)
             end)
             dcT = t2
             -- credits: Mois7 admin developers' Discord
@@ -6112,6 +6256,7 @@ task.spawn(function()
         end)
 
         -- welcome screen first; START leads into the loading screen. If it fails to build, go straight to loading.
+        Boot.close()
         do
             local okG, eG = pcall(showGate)
             if not okG then
@@ -6133,6 +6278,13 @@ end)
 
 if C.queue then
     C.queue(hrs)
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = "VR Hands",
+            Text = "Rejoining to apply the VR hook. If the script does not come back within ~20 seconds, this executor did not re-run it after the rejoin.",
+            Duration = 10,
+        })
+    end)
     TeleportService:Teleport(game.PlaceId, Players.LocalPlayer)
 else
     -- no way to carry the script across a teleport, so just run it now
