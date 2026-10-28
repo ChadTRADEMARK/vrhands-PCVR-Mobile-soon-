@@ -43,11 +43,15 @@ local UPDATE_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR
 -- ==========================================================
 
 -- Shown in Start Menu > Profile > STATUS tab. Bump SCRIPT_VERSION whenever you publish a new version.
-local SCRIPT_VERSION = "1.12.5"
+local SCRIPT_VERSION = "2.0.3"
+-- The "version" field is what keeps the script in sync with Discord: your bot writes the version it announces there,
+-- and the script shows it next to the version you are running (Profile > STATUS and the welcome stats page).
+-- Version pattern: every number counts 0..12 and carries after 12, so 2.0.12 -> 2.1.0 and 2.12.12 -> 3.0.0
+-- (the same rule is in the Version helper below, so the script, the status file and Discord all agree).
 -- Optional: RAW link to a small JSON file YOU host. It feeds the Banwave / Key system / Script rows.
 -- Leave "" to skip. Example file:
 --   { "banwave": "clear", "banwave_note": "No wave reported",
---     "key_system": "online", "script": "working", "message": "All good" }
+--     "key_system": "online", "script": "working", "version": "2.0.3", "message": "All good" }
 -- banwave: clear | warning | active    key_system: online | degraded | offline | none    script: working | updating | patched
 -- (status_feed_patch.js makes your bot write + publish this file for you.)
 local STATUS_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR-Mobile-soon-/refs/heads/main/status.json"
@@ -286,6 +290,42 @@ function Theme.set(hue, size)
     for _, f in ipairs(Theme.listeners) do pcall(f) end
 end
 -- ===========================================================
+
+-- ============ VERSION PATTERN ============
+-- Every number counts 0..12 and carries after 12:  2.0.12 -> 2.1.0   and   2.12.12 -> 3.0.0
+-- (every update is +1 on the last number, and the carry repeats for the number before it).
+local Version = { LIMIT = 12 }
+function Version.parse(v)
+    local a, b, c = tostring(v or ""):match("(%d+)%.(%d+)%.(%d+)")
+    if not a then return nil end
+    return { tonumber(a), tonumber(b), tonumber(c) }
+end
+function Version.bump(v)
+    local p = Version.parse(v)
+    if not p then return nil end
+    p[3] += 1
+    if p[3] > Version.LIMIT then p[3] = 0; p[2] += 1 end
+    if p[2] > Version.LIMIT then p[2] = 0; p[1] += 1 end
+    return p[1] .. "." .. p[2] .. "." .. p[3]
+end
+-- -1 = a is older than b, 0 = same, 1 = a is newer. nil when one of them is not a version number.
+function Version.cmp(a, b)
+    local pa, pb = Version.parse(a), Version.parse(b)
+    if not pa or not pb then return nil end
+    for i = 1, 3 do
+        if pa[i] ~= pb[i] then return pa[i] < pb[i] and -1 or 1 end
+    end
+    return 0
+end
+-- text for the "Discord / feed version" rows: returns text, state
+function Version.feedRow(feed, mine)
+    local c = Version.cmp(feed, mine)
+    if c == 0 then return "v" .. feed .. "  (in sync)", "ok" end
+    if c == 1 then return "v" .. feed .. "  (update available, you have v" .. mine .. ")", "warn" end
+    if c == -1 then return "v" .. feed .. "  (feed is behind, you have v" .. mine .. ")", "warn" end
+    return "v" .. tostring(feed) .. "  (you have v" .. mine .. ")", "warn"
+end
+-- ========================================
 
 -- ============ SAVED SETTINGS ============
 -- Your last settings (menu colour + size, crosshair, avatar size) are saved to this file
@@ -4631,6 +4671,8 @@ task.spawn(function()
                     sSection("SCRIPT")
                     sRow("Script version", SCRIPT_VERSION)
                     local rNew    = sRow("Latest version", "checking...")
+                    local rDisc   = sRow("Discord / feed version", "checking...")
+                    sRow("Next version", "v" .. (Version.bump(SCRIPT_VERSION) or "?"))
                     local rScript = sRow("Script status", "checking...")
                     local rAU = sRow("Auto-update", AU.text, AU.level)
                     sRow("Gestures / grab", Input and "Hooked" or "Not found", Input and "ok" or "warn")
@@ -4741,9 +4783,18 @@ task.spawn(function()
                                 rMsg.set(remote.message and tostring(remote.message) or "-", nil)
                             end
 
-                            -- script version: compare with the copy at UPDATE_URL
-                            local latest
-                            if type(UPDATE_URL) == "string" and UPDATE_URL ~= "" then
+                            -- version the Discord bot / status feed announces
+                            if remote and remote.version then
+                                rDisc.set(Version.feedRow(tostring(remote.version), SCRIPT_VERSION))
+                            elseif remote then
+                                rDisc.set("not published in feed", nil)
+                            else
+                                rDisc.set("Status file unreachable", "warn")
+                            end
+
+                            -- latest version: the feed's version first, else the copy at UPDATE_URL
+                            local latest = remote and remote.version and tostring(remote.version) or nil
+                            if not latest and type(UPDATE_URL) == "string" and UPDATE_URL ~= "" then
                                 local text = fetchSource(UPDATE_URL)
                                 if text then latest = text:match('SCRIPT_VERSION%s*=%s*"([%w%.%-]+)"') end
                             end
@@ -6121,6 +6172,8 @@ task.spawn(function()
             section("SCRIPT  (live)")
             R.ver    = row("Script version", SCRIPT_VERSION)
             R.latest = row("Latest version", "checking...")
+            R.disc   = row("Discord / feed version", "checking...")
+            row("Next version", "v" .. (Version.bump(SCRIPT_VERSION) or "?"))
             R.sstat  = row("Script status", "checking...")
             R.au     = row("Auto-update", "-")
 
@@ -6261,6 +6314,15 @@ task.spawn(function()
                     else R.key.set("Unknown", nil) end
 
                     R.msg.set(st.message and tostring(st.message) or "-", nil)
+                end
+
+                -- version announced by the Discord bot / status feed
+                if st and st.version then
+                    R.disc.set(Version.feedRow(tostring(st.version), SCRIPT_VERSION))
+                elseif st then
+                    R.disc.set("not published in feed", nil)
+                else
+                    R.disc.set("Status file unreachable", "warn")
                 end
 
                 -- script
