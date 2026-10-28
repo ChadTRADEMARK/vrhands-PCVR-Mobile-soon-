@@ -287,6 +287,24 @@ function Theme.set(hue, size)
 end
 -- ===========================================================
 
+-- ============ SAVED SETTINGS ============
+-- Your last settings (menu colour + size, crosshair, avatar size) are saved to this file
+-- (needs writefile / readfile) and come back the next time the script starts.
+local SETTINGS_FILE = "NoVR_Settings.json"
+local Saved = {}
+do
+    local okr, raw = pcall(function() return isfile and isfile(SETTINGS_FILE) and readfile(SETTINGS_FILE) end)
+    if okr and type(raw) == "string" and raw ~= "" then
+        local okj, data = pcall(function() return game:GetService("HttpService"):JSONDecode(raw) end)
+        if okj and type(data) == "table" then Saved = data end
+    end
+    if type(Saved.theme) == "table" then
+        if tonumber(Saved.theme.hue) then Theme.hue = tonumber(Saved.theme.hue) end
+        if tonumber(Saved.theme.size) then Theme.size = math.clamp(tonumber(Saved.theme.size), 0.6, 1.4) end
+    end
+end
+-- ========================================
+
 -- Third person works by leaving the CAMERA as the free camera you steer, and
 -- telling the game your HEAD (and hands) sit TP.D studs in front of it.
 -- Zooming only changes TP.D, so the head never moves when you zoom.
@@ -1248,6 +1266,50 @@ task.spawn(function()
     }
     local XH_DEFAULTS = {}
     for k, v in pairs(XH) do XH_DEFAULTS[k] = v end
+
+    -- restore the saved crosshair + avatar size
+    do
+        local sx = type(Saved.xh) == "table" and Saved.xh or {}
+        for _, k in ipairs({ "enabled", "outline", "dot", "always" }) do
+            if type(sx[k]) == "boolean" then XH[k] = sx[k] end
+        end
+        for _, k in ipairs({ "size", "gap", "thickness", "radius" }) do
+            if tonumber(sx[k]) then XH[k] = tonumber(sx[k]) end
+        end
+        if tonumber(sx.opacity) then XH.opacity = math.clamp(tonumber(sx.opacity), 0.1, 1) end
+        if table.find({ "Cross", "T", "Circle", "Dot" }, sx.style) then XH.style = sx.style end
+        if table.find({ "Forward", "Back", "Up", "Down", "Right", "Left" }, sx.axis) then XH.axis = sx.axis end
+        if table.find({ "Held object", "Grip only" }, sx.detect) then XH.detect = sx.detect end
+        if type(sx.color) == "table" and tonumber(sx.color[1]) and tonumber(sx.color[2]) and tonumber(sx.color[3]) then
+            XH.color = Color3.fromRGB(sx.color[1], sx.color[2], sx.color[3])
+        end
+        XH.dirty = true
+        if tonumber(Saved.scale) then setScale(Saved.scale) end
+    end
+
+    -- autosave: every 2 seconds, writes the file only if something changed
+    task.spawn(function()
+        local function ser()
+            local c = XH.color
+            return string.format(
+                '{"theme":{"hue":%.2f,"size":%.3f},"scale":%d,"xh":{"enabled":%s,"style":"%s","size":%d,"gap":%d,"thickness":%d,'
+                .. '"color":[%d,%d,%d],"opacity":%.2f,"outline":%s,"dot":%s,"axis":"%s","detect":"%s","radius":%d,"always":%s}}',
+                Theme.hue, Theme.size, math.floor(S.scale + 0.5),
+                tostring(XH.enabled), XH.style, XH.size, XH.gap, XH.thickness,
+                math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5),
+                XH.opacity, tostring(XH.outline), tostring(XH.dot), XH.axis, XH.detect, XH.radius, tostring(XH.always))
+        end
+        local okB, base = pcall(ser)
+        local last = okB and base or ""   -- the state that was just loaded: only real changes get written
+        while true do
+            task.wait(2)
+            local okS, js = pcall(ser)
+            if okS and js ~= last then
+                pcall(function() if writefile then writefile(SETTINGS_FILE, js) end end)
+                last = js
+            end
+        end
+    end)
 
     local AXES = {
         Forward = function(cf) return cf.LookVector end,
@@ -3307,55 +3369,44 @@ task.spawn(function()
         end
         -- ==============================================================
 
-        -- ============ OPTIONAL EXTRA LOADERS (Mois7 Admin + Better AntiVCB) ============
-        -- Two extra scripts that can be switched ON / OFF. Your choice is remembered on this computer
-        -- (needs writefile), and both switches live in two places that stay in sync:
-        --   * the welcome screen (before the loading screen)   * Start Menu > Quick Settings
-        -- Switching one ON runs it right away (once per session); switching OFF stops it from loading
-        -- next time - a script that is already running can't be unloaded until you rejoin.
-        local OPT_URL  = {
-            m7   = "https://mois7.xyz/loader",
-            avcb = "https://luaprot.net/api/v3/loaders/get/00320986376827821485",
-        }
-        local OPT_NAME = { m7 = "Mois7 Admin", avcb = "Better AntiVCB" }
-        local OPT_FILE = { m7 = "NoVR_M7.txt", avcb = "NoVR_BetterAntiVCB.txt" }
-        local Opt = {}
-        local function readOpt(key)
-            local ok, v = pcall(function() return isfile and isfile(OPT_FILE[key]) and readfile(OPT_FILE[key]) end)
+        -- ============ BETTER ANTIVCB (extra loader) ============
+        local AVCB_URL  = "https://luaprot.net/api/v3/loaders/get/00320986376827821485"
+        local AVCB_FILE = "NoVR_AntiVCB.txt"   -- remembers the YES / NO choice (needs writefile)
+        local function readAVCB()
+            local ok, v = pcall(function() return isfile and isfile(AVCB_FILE) and readfile(AVCB_FILE) end)
             return ok and v == "yes"
         end
-        local function saveOpt(key, on)
-            pcall(function() if writefile then writefile(OPT_FILE[key], on and "yes" or "no") end end)
+        local function saveAVCB(on)
+            pcall(function() if writefile then writefile(AVCB_FILE, on and "yes" or "no") end end)
         end
-        Opt.m7, Opt.avcb = readOpt("m7"), readOpt("avcb")   -- both default to OFF
-
-        -- same as:  loadstring(game:HttpGet(<url>))()
-        local function runOpt(key)
-            _G.NoVR_OptRan = _G.NoVR_OptRan or {}
-            if _G.NoVR_OptRan[key] then return end
-            _G.NoVR_OptRan[key] = true
+        -- same as: loadstring(game:HttpGet("<AVCB_URL>"))()   (runs once per session)
+        local function runAVCB()
+            if _G.NoVR_AVCBRan then return end
+            _G.NoVR_AVCBRan = true
             task.spawn(function()
-                local url = OPT_URL[key]
-                local okG, src = pcall(function() return game:HttpGet(url) end)
-                if not (okG and type(src) == "string" and #src > 0) then src = rawGet(url) end
+                local okG, src = pcall(function() return game:HttpGet(AVCB_URL) end)
+                if not (okG and type(src) == "string" and #src > 0) then src = rawGet(AVCB_URL) end
                 if not src then
-                    warn("[NoVR] " .. OPT_NAME[key] .. ": could not download the loader")
-                    _G.NoVR_OptRan[key] = nil
+                    warn("[NoVR] Better AntiVCB: could not download the loader")
+                    _G.NoVR_AVCBRan = nil
                     return
                 end
                 local fn, err = (EXEC.loadstring or loadstring or load)(src)
-                if not fn then warn("[NoVR] " .. OPT_NAME[key] .. ": loader has an error: " .. tostring(err)) return end
+                if not fn then
+                    warn("[NoVR] Better AntiVCB: loader has an error: " .. tostring(err))
+                    _G.NoVR_AVCBRan = nil
+                    return
+                end
                 local ok, e = pcall(fn)
-                if ok then print("[NoVR] " .. OPT_NAME[key] .. " loaded") else warn("[NoVR] " .. OPT_NAME[key] .. " failed: " .. tostring(e)) end
+                if ok then
+                    print("[NoVR] Better AntiVCB loaded")
+                else
+                    warn("[NoVR] Better AntiVCB failed: " .. tostring(e))
+                    _G.NoVR_AVCBRan = nil
+                end
             end)
         end
-        -- switch from the Start Menu: remember the choice, and run it now when it was turned ON
-        local function flipOpt(key)
-            Opt[key] = not Opt[key]
-            saveOpt(key, Opt[key])
-            if Opt[key] then runOpt(key) end
-        end
-        -- ====================================================================
+        -- =======================================================
 
         local function openStart()
             if startGui then return end
@@ -3586,7 +3637,7 @@ task.spawn(function()
 
             local main = makePanel(0, 0, MAINW, PH, "Panel", 0)
             local dock = makePanel(135, PH + 22, 560, 62, "Dock", 0.2)
-            local side = makePanel(MAINW + 14, 90, 246, 360, "Side", 0.12)
+            local side = makePanel(MAINW + 14, 100, 246, 356, "Side", 0.12)
 
             -- ===== OVERLAY PANELS: Controls (PC + Mobile) and Settings (colour + size) =====
             local CONTROLS = {
@@ -5236,9 +5287,9 @@ task.spawn(function()
                     setLook(false)   -- keep the cursor free while this menu is open
                 end
             end, function() return hudApi.mobileOpen and hudApi.mobileOpen() end)
-            -- the two extra loaders (same switches as on the welcome screen)
-            toggle("Mois7 Admin", "plus", PINK, 2, 0, function() flipOpt("m7") end, function() return Opt.m7 end)
-            toggle("Better AntiVCB", "lock", PINK, 2, 1, function() flipOpt("avcb") end, function() return Opt.avcb end)
+            toggle("AntiVCB", "lock", PINK, 2, 0, function()
+                runAVCB()
+            end, function() return _G.NoVR_AVCBRan == true end)
 
             -- vertical size slider
             local track = Instance.new("Frame")
@@ -5309,7 +5360,7 @@ task.spawn(function()
 
             -- ===== update button =====
             local upd = Instance.new("TextButton")
-            upd.Position = UDim2.fromOffset(14, 284)
+            upd.Position = UDim2.fromOffset(14, 290)
             upd.Size = UDim2.fromOffset(218, 38)
             upd.AutoButtonColor = false
             upd.BackgroundColor3 = Color3.new(1, 1, 1)
@@ -5324,7 +5375,7 @@ task.spawn(function()
             stroke(upd, Color3.new(1, 1, 1), 1.5, 0.2)
             local usc = Instance.new("UIScale")
             usc.Parent = upd
-            local ustat = lbl(side, "", 14, 326, 218, 16, 10, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+            local ustat = lbl(side, "", 14, 332, 218, 16, 10, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
             ustat.TextTruncate = Enum.TextTruncate.None
             ustat.TextWrapped = true
             ustat.Size = UDim2.fromOffset(218, 22)
@@ -5745,7 +5796,34 @@ task.spawn(function()
             return d
         end
 
-        -- (the Mois7 Admin / Better AntiVCB switches live in the "OPTIONAL EXTRA LOADERS" block above)
+        -- ---- optional extra loader (M7): chosen with YES / NO on the welcome screen ----
+        local M7_URL  = "https://mois7.xyz/loader"
+        local M7_FILE = "NoVR_M7.txt"   -- remembers the last choice on this computer (needs writefile)
+        local function readM7()
+            local ok, v = pcall(function() return isfile and isfile(M7_FILE) and readfile(M7_FILE) end)
+            return ok and v == "yes"
+        end
+        local function saveM7(on)
+            pcall(function() if writefile then writefile(M7_FILE, on and "yes" or "no") end end)
+        end
+        -- same as: loadstring(game:HttpGet("https://mois7.xyz/loader"))()   (runs once per session)
+        local function runM7()
+            if _G.NoVR_M7Ran then return end
+            _G.NoVR_M7Ran = true
+            task.spawn(function()
+                local okG, src = pcall(function() return game:HttpGet(M7_URL) end)
+                if not (okG and type(src) == "string" and #src > 0) then src = rawGet(M7_URL) end
+                if not src then
+                    warn("[NoVR] M7: could not download the loader")
+                    _G.NoVR_M7Ran = nil
+                    return
+                end
+                local fn, err = (EXEC.loadstring or loadstring or load)(src)
+                if not fn then warn("[NoVR] M7: loader has an error: " .. tostring(err)) return end
+                local ok, e = pcall(fn)
+                if ok then print("[NoVR] M7 loaded") else warn("[NoVR] M7 failed: " .. tostring(e)) end
+            end)
+        end
 
         local function showGate()
             loaderActive = true
@@ -5785,14 +5863,14 @@ task.spawn(function()
             local stage = Instance.new("Frame")
             stage.AnchorPoint = Vector2.new(0.5, 0.5)
             stage.Position = UDim2.new(0.5, 0, 0.5, 26)
-            stage.Size = UDim2.fromOffset(520, 510)
+            stage.Size = UDim2.fromOffset(520, 500)
             stage.BackgroundTransparency = 1
             stage.Parent = g
             local fitS = Instance.new("UIScale")
             fitS.Parent = stage
             local function refit()
                 local v = cam.ViewportSize
-                fitS.Scale = math.clamp(math.min(v.X / 560, v.Y / 550), 0.5, 1.5)
+                fitS.Scale = math.clamp(math.min(v.X / 560, v.Y / 530), 0.5, 1.5)
             end
             refit()
             local vpConn = cam:GetPropertyChangedSignal("ViewportSize"):Connect(refit)
@@ -5800,6 +5878,8 @@ task.spawn(function()
 
             local alive = true
             local starting = false
+            local m7On = readM7()   -- default NO
+            local avcbOn = readAVCB()   -- default NO
 
             -- ===== buttons =====
             local function mkBtn(parent, x, y, w, h, text, kind, onClick)
@@ -5859,9 +5939,12 @@ task.spawn(function()
                 starting = true
                 alive = false
                 vpConn:Disconnect()
-                -- the extra loaders chosen on this screen start together with the loading screen
-                if Opt.m7 then runOpt("m7") end
-                if Opt.avcb then runOpt("avcb") end
+                if m7On then runM7() end   -- starts together with the loading screen
+                if avcbOn then
+                    -- Better AntiVCB loads 30 seconds after START (runAVCB only runs once per session)
+                    print("[NoVR] Better AntiVCB will load in 30 seconds")
+                    task.delay(30, runAVCB)
+                end
                 tw(gblur, 0.6, { Size = 0 }, Enum.EasingStyle.Sine)
                 task.delay(0.7, function() gblur:Destroy() end)
                 showLoader()   -- the loading screen fades in on top (higher DisplayOrder)
@@ -5869,45 +5952,44 @@ task.spawn(function()
             end
 
             -- ===== page 1: START / JOIN DISCORD / VIEW STATS =====
-            local title = lbl(pg1, "V R   H A N D S", 0, 40, 520, 44, 34, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+            local title = lbl(pg1, "V R   H A N D S", 0, 56, 520, 44, 34, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
             grad(title, C(255, 255, 255), C(190, 150, 255), 0)
-            lbl(pg1, "No-VR  |  Edited by @N4THAFTER", 0, 88, 520, 18, 12, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
-            lbl(pg1, "v" .. SCRIPT_VERSION, 0, 108, 520, 16, 11, MUTED, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+            lbl(pg1, "No-VR  |  Edited by @N4THAFTER", 0, 104, 520, 18, 12, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+            lbl(pg1, "v" .. SCRIPT_VERSION, 0, 124, 520, 16, 11, MUTED, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
 
-            mkBtn(pg1, 110, 140, 300, 58, "START", "start", goStart)
+            mkBtn(pg1, 110, 156, 300, 58, "START", "start", goStart)
             local dcT
-            local _, t2 = mkBtn(pg1, 110, 208, 300, 44, "JOIN DISCORD", "discord", function()
+            local _, t2 = mkBtn(pg1, 110, 224, 300, 44, "JOIN DISCORD", "discord", function()
                 dcT.Text = joinDiscord(nil, nil, function(t) if dcT.Parent then dcT.Text = t end end)
                 task.delay(2.4, function() if dcT.Parent then dcT.Text = "JOIN DISCORD" end end)
             end)
             dcT = t2
             -- credits: Mois7 admin developers' Discord
             local m7dT
-            local _, t3 = mkBtn(pg1, 110, 260, 300, 44, "MOIS7 DISCORD", "discord", function()
+            local _, t3 = mkBtn(pg1, 110, 276, 300, 44, "MOIS7 DISCORD", "discord", function()
                 m7dT.Text = joinDiscord("https://discord.gg/dQ9NjDNmM", "dQ9NjDNmM")
                 task.delay(2.2, function() if m7dT.Parent then m7dT.Text = "MOIS7 DISCORD" end end)
             end)
             m7dT = t3
-            local credit = lbl(pg1, "Credits to Mois7 Admin developers, Here is their discord link!", 70, 306, 380, 30, 11, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+            local credit = lbl(pg1, "Credits to Mois7 Admin developers, Here is their discord link!", 70, 322, 380, 30, 11, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
             credit.TextWrapped = true
             credit.TextTruncate = Enum.TextTruncate.None
             credit.TextYAlignment = Enum.TextYAlignment.Top
-            mkBtn(pg1, 110, 340, 300, 44, "VIEW STATS", "glass", function() showPage(2) end)
+            mkBtn(pg1, 110, 356, 300, 44, "VIEW STATS", "glass", function() showPage(2) end)
 
-            -- extra scripts: Mois7 Admin  [NO][YES]   and under it   Better AntiVCB  [NO][YES]
-            lbl(pg1, "Load with this script?", 0, 396, 520, 16, 12, MUTED, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
-            local function mkOpt(y, text, key)
-                lbl(pg1, text, 110, y, 150, 34, 14, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Left)
+            -- optional extras, each with its own [NO] [YES]
+            local function mkOption(y, label, getOn, setOn)
+                lbl(pg1, label, 40, y + 4, 290, 22, 13, WHITE, Enum.Font.GothamBold)
                 local pair = {}
                 local function paint()
                     for val, c in pairs(pair) do
-                        tw(c.sel, 0.25, { BackgroundTransparency = (val == Opt[key]) and 0 or 1 })
+                        tw(c.sel, 0.25, { BackgroundTransparency = (val == getOn()) and 0 or 1 })
                     end
                 end
-                local function mkChoice(x, label, val)
+                local function mkChoice(x, text, val)
                     local b = Instance.new("TextButton")
                     b.Position = UDim2.fromOffset(x, y)
-                    b.Size = UDim2.fromOffset(72, 34)
+                    b.Size = UDim2.fromOffset(70, 30)
                     b.AutoButtonColor = false
                     b.BackgroundColor3 = Color3.new(1, 1, 1)
                     b.BackgroundTransparency = 0.86
@@ -5916,34 +5998,32 @@ task.spawn(function()
                     b.Parent = pg1
                     corner(b, 10)
                     stroke(b, C(215, 185, 255), 1.5, 0.4)
-                    local sel = Instance.new("Frame")   -- gradient fill shown on the chosen option
+                    local sel = Instance.new("Frame")
                     sel.Size = UDim2.fromScale(1, 1)
                     sel.BackgroundColor3 = Color3.new(1, 1, 1)
-                    sel.BackgroundTransparency = (val == Opt[key]) and 0 or 1
+                    sel.BackgroundTransparency = (val == getOn()) and 0 or 1
                     sel.BorderSizePixel = 0
                     sel.Active = false
                     sel.Parent = b
                     corner(sel, 10)
                     grad(sel, PINK, VIOLET, 0)
-                    lbl(b, label, 0, 0, 72, 34, 14, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+                    lbl(b, text, 0, 0, 70, 30, 13, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
                     local sc2 = Instance.new("UIScale")
                     sc2.Parent = b
-                    b.MouseEnter:Connect(function() tw(sc2, 0.4, { Scale = 1.06 }, Enum.EasingStyle.Back) end)
+                    b.MouseEnter:Connect(function() tw(sc2, 0.4, { Scale = 1.05 }, Enum.EasingStyle.Back) end)
                     b.MouseLeave:Connect(function() tw(sc2, 0.45, { Scale = 1 }, Enum.EasingStyle.Back) end)
                     b.InputBegan:Connect(function(io) if isPress(io) then tw(sc2, 0.1, { Scale = 0.94 }); ripple(b, io, fitS.Scale) end end)
                     b.InputEnded:Connect(function(io) if isPress(io) then tw(sc2, 0.45, { Scale = 1 }, Enum.EasingStyle.Back) end end)
-                    b.Activated:Connect(function()
-                        Opt[key] = val
-                        saveOpt(key, val)
-                        paint()
-                    end)
+                    b.Activated:Connect(function() setOn(val); paint() end)
                     pair[val] = { sel = sel }
                 end
-                mkChoice(262, "NO", false)
-                mkChoice(338, "YES", true)
+                mkChoice(340, "NO", false)
+                mkChoice(418, "YES", true)
             end
-            mkOpt(418, "Mois7 Admin", "m7")
-            mkOpt(460, "Better AntiVCB", "avcb")
+            mkOption(410, "Load M7 with this script?", function() return m7On end,
+                function(v) m7On = v; saveM7(v) end)
+            mkOption(446, "Better AntiVCB", function() return avcbOn end,
+                function(v) avcbOn = v; saveAVCB(v) end)
 
             -- ===== page 2: live stats =====
             local COLS = { ok = GREEN, warn = C(255, 205, 110), bad = C(255, 110, 120) }
@@ -5952,7 +6032,7 @@ task.spawn(function()
 
             local sc = Instance.new("ScrollingFrame")
             sc.Position = UDim2.fromOffset(16, 64)
-            sc.Size = UDim2.fromOffset(488, 370)
+            sc.Size = UDim2.fromOffset(488, 330)
             sc.BackgroundTransparency = 1
             sc.BorderSizePixel = 0
             sc.ScrollBarThickness = 4
@@ -6064,8 +6144,8 @@ task.spawn(function()
             feat("Metatable hooks", (EXEC.getrawmetatable ~= nil) or (EXEC.hookmetamethod ~= nil), true)
             feat("Hand gestures (getgc)", EXEC.getgc ~= nil, false)
 
-            mkBtn(pg2, 16, 446, 150, 46, "BACK", "glass", function() showPage(1) end)
-            mkBtn(pg2, 344, 446, 160, 46, "START", "start", goStart)
+            mkBtn(pg2, 16, 406, 150, 46, "BACK", "glass", function() showPage(1) end)
+            mkBtn(pg2, 344, 406, 160, 46, "START", "start", goStart)
 
             -- ===== fill the rows from freshly fetched data =====
             local function applyStats(d)
