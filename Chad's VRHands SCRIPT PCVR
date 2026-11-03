@@ -476,7 +476,16 @@ task.spawn(function()
         handSens = 0.004,       -- mouse sensitivity for hand mode (PC)
         handStick = 1.8,        -- (unused now, old drift speed)
         handRange = 1.6,        -- hand movement per full joystick-radius of finger/mouse drag (raise for faster hands)
+        camView = "Normal",     -- C: Normal | Front (2nd POV) | Hands (camera follows both hands) | Left Hand | Right Hand
     }
+    -- Camera views. Only YOUR screen moves: your real head stays where it is (the game never sees the camera move).
+    S.CAM_VIEWS = { "Normal", "Front", "Hands", "Left Hand", "Right Hand" }
+    function S.cycleCam(to)
+        if to then S.camView = to; return end
+        local idx = 1
+        for i, v in ipairs(S.CAM_VIEWS) do if v == S.camView then idx = i end end
+        S.camView = S.CAM_VIEWS[idx % #S.CAM_VIEWS + 1]
+    end
 
     -- recolour the live menus whenever the theme changes
     Theme.listeners[#Theme.listeners + 1] = function()
@@ -910,7 +919,7 @@ task.spawn(function()
 
     local lastTP = false
     RunService:BindToRenderStep("NoVR_HeadVis", Enum.RenderPriority.Last.Value, function()
-        if S.thirdPerson then
+        if S.thirdPerson or S.camView ~= "Normal" then
             lastTP = true
             ensureClones()
             updateClones()
@@ -986,6 +995,9 @@ task.spawn(function()
             if io.KeyCode == Enum.KeyCode.LeftAlt then setLook(not S.look) end
             if io.KeyCode == Enum.KeyCode.Equals  then setScale(S.scale + 1) end
             if io.KeyCode == Enum.KeyCode.Minus   then setScale(S.scale - 1) end
+
+            -- Camera view (C): Normal > Front (2nd POV) > Hands > Left Hand > Right Hand
+            if io.KeyCode == Enum.KeyCode.C and not UIS:GetFocusedTextBox() then S.cycleCam() end
 
             -- Third person toggle
             if io.KeyCode == Enum.KeyCode.P then
@@ -1255,6 +1267,29 @@ task.spawn(function()
         -- right before the frame is drawn (see NoVR_CamView below), so other
         -- players never see your head follow the third-person camera.
         camBack = CFrame.new(camPos - rot.LookVector * D) * rot
+        if S.camView ~= "Normal" then
+            -- zoom (I / O) sets how far the camera sits from whatever it follows
+            local dist = math.max(S.tpDist * headUnit(), 0.5)
+            local sc = resolveScale()
+            local function handPos(side)
+                local off
+                if side < 0 then off = Vector3.new(-S.spread + S.handLX, S.height + S.handLY, -S.reachL)
+                else off = Vector3.new(S.spread + S.handRX, S.height + S.handRY, -S.reachR) end
+                return headCF:PointToWorldSpace(off * sc)
+            end
+            if S.camView == "Front" then
+                -- 2nd POV: camera in front of you, looking back at your avatar
+                camBack = CFrame.lookAt(camPos + rot.LookVector * dist, camPos)
+            else
+                -- Hand POV: the camera rides along with the hand(s) (your head stays put).
+                -- You still steer with the mouse; reach out far and the view follows your hand out there.
+                local target
+                if S.camView == "Left Hand" then target = handPos(-1)
+                elseif S.camView == "Right Hand" then target = handPos(1)
+                else target = (handPos(-1) + handPos(1)) / 2 end
+                camBack = CFrame.new(target - rot.LookVector * dist) * rot
+            end
+        end
         cam.CFrame = headCF
 
         if Input then
@@ -2671,6 +2706,8 @@ task.spawn(function()
                     hl(keyHeld(Enum.KeyCode.P), "#ffffff"),
                     S.thirdPerson and ' <font color="#00ff00">[ON]</font>' or "",
                     S.tpDist, S.curD)..
+                (' <font color="%s">C = Camera View: %s (Front / Hands / Left / Right Hand)</font>\n'):format(
+                    hl(keyHeld(Enum.KeyCode.C), "#ffffff"), S.camView)..
                 (' <font color="%s">N = Hand Mode%s | B = Reset Hands</font>\n'):format(
                     hl(keyHeld(Enum.KeyCode.N), "#ffffff"),
                     S.handMode and ' <font color="#00ff00">[ON]</font>' or "")..
@@ -4894,6 +4931,7 @@ task.spawn(function()
                 { "Fly",                  "WASD, Space / Shift", "up", "fly move wasd space shift" },
                 { "Hand reach",           "Wheel (+ LMB / RMB)", "reach", "reach wheel distance zoom hand left right lmb rmb" },
                 { "Third person",         "P, zoom I / O",      "person", "third person camera zoom p i o" },
+                { "Camera views",         "C (cycle), zoom I / O", "reach", "camera view c second pov 2nd front hand pov follow" },
                 { "Hand mode",            "N, reset with B",    "hand", "hand mode n reset b" },
             }
             local rows = {}
@@ -5180,6 +5218,7 @@ task.spawn(function()
                 local items = {
                     { "person", C(186, 98, 255), C(110, 80, 235), function() S.thirdPerson = not S.thirdPerson end, function() return S.thirdPerson end },
                     { "hand", C(90, 150, 255), C(70, 90, 230), function() S.handMode = not S.handMode end, function() return S.handMode end },
+                    { "reach", C(255, 120, 150), C(200, 70, 160), function() S.cycleCam() end, function() return S.camView ~= "Normal" end },
                     { "reset", C(80, 220, 235), C(50, 140, 200), function() S.handLX, S.handLY, S.handRX, S.handRY = 0, 0, 0, 0; S.reachL, S.reachR = 2, 2 end },
                     { "clock", C(255, 170, 80), C(235, 110, 90), function() keys[Enum.KeyCode.LeftControl] = not keys[Enum.KeyCode.LeftControl] end, function() return keys[Enum.KeyCode.LeftControl] == true end },
                     { "phone", C(255, 110, 190), C(190, 80, 235), function()
