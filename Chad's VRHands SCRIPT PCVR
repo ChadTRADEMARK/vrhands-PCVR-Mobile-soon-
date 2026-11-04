@@ -3908,7 +3908,9 @@ task.spawn(function()
             end
 
             local main, mainEnt = makePanel(0, 0, MAINW, PH, "Panel", 0)
-            local dock, dockEnt = makePanel(135, PH + 22, 560, 62, "Dock", 0.2)
+            -- wide enough for the FPS box on the left, the PING box on the right and every dock icon between them
+            local DOCKW = 720
+            local dock, dockEnt = makePanel((PW - DOCKW) / 2, PH + 22, DOCKW, 62, "Dock", 0.2)
             local side, sideEnt = makePanel(MAINW + 14, 90, 246, 360, "Side", 0.12)
             -- the Main window, the Dock and the Side panel each scale on their own: drag the corner handle (saved)
             -- (Settings > Menu size still scales the whole Start Menu at once)
@@ -5733,9 +5735,21 @@ task.spawn(function()
                 { "Hand mode",            "N, reset with B",    "hand", "hand mode n reset b" },
             }
             local rows = {}
+            -- the list scrolls inside its own box, so extra rows never run into the profile bar below it
+            local listSc = Instance.new("ScrollingFrame")
+            listSc.Name = "ControlsList"
+            listSc.Position = UDim2.fromOffset(14, 96)
+            listSc.Size = UDim2.fromOffset(262, 276)
+            listSc.BackgroundTransparency = 1
+            listSc.BorderSizePixel = 0
+            listSc.ScrollBarThickness = 3
+            listSc.ScrollingDirection = Enum.ScrollingDirection.Y
+            listSc.CanvasSize = UDim2.fromOffset(0, #rowsData * 34)
+            listSc.ClipsDescendants = true
+            listSc.Parent = main
             for i, r in ipairs(rowsData) do
                 local f = Instance.new("CanvasGroup")
-                f.Position = UDim2.fromOffset(14, 96 + (i - 1) * 34 + 12)
+                f.Position = UDim2.fromOffset(0, (i - 1) * 34 + 12)
                 f.Size = UDim2.fromOffset(256, 32)
                 f.BackgroundColor3 = Color3.new(1, 1, 1)
                 f.BackgroundTransparency = 0.84
@@ -5743,7 +5757,7 @@ task.spawn(function()
                 stroke(f, Color3.new(1, 1, 1), 1, 0.8)
                 f.GroupTransparency = 1
                 f.BorderSizePixel = 0
-                f.Parent = main
+                f.Parent = listSc
                 local ic = Instance.new("Frame")
                 ic.Position = UDim2.fromOffset(6, 4)
                 ic.Size = UDim2.fromOffset(24, 24)
@@ -5759,7 +5773,7 @@ task.spawn(function()
                 rows[i] = { f = f, search = string.lower(r[1] .. " " .. r[2] .. " " .. r[4]), shown = true }
                 task.delay(0.3 + i * 0.045, function()
                     if startGui ~= g then return end
-                    tw(f, 0.5, { GroupTransparency = 0, Position = UDim2.fromOffset(14, 96 + (i - 1) * 34) })
+                    tw(f, 0.5, { GroupTransparency = 0, Position = UDim2.fromOffset(0, (i - 1) * 34) })
                 end)
             end
             local function layoutRows(query)
@@ -5769,13 +5783,15 @@ task.spawn(function()
                         n += 1
                         r.shown = true
                         r.f.Visible = true
-                        tw(r.f, 0.32, { Position = UDim2.fromOffset(14, 96 + (n - 1) * 34), GroupTransparency = 0 })
+                        tw(r.f, 0.32, { Position = UDim2.fromOffset(0, (n - 1) * 34), GroupTransparency = 0 })
                     else
                         r.shown = false
                         tw(r.f, 0.2, { GroupTransparency = 1 })
                         task.delay(0.22, function() if not r.shown then r.f.Visible = false end end)
                     end
                 end
+                listSc.CanvasSize = UDim2.fromOffset(0, math.max(n, 1) * 34)
+                listSc.CanvasPosition = Vector2.zero
             end
             tb:GetPropertyChangedSignal("Text"):Connect(function()
                 layoutRows(string.lower(tb.Text))
@@ -6009,7 +6025,7 @@ task.spawn(function()
                 return v
             end
             local fpsVal  = statBox(8, "FPS")
-            local pingVal = statBox(442, "PING")
+            local pingVal = statBox(DOCKW - 118, "PING")
 
             -- ===== dock (taskbar style): one-tap shortcuts =====
             do
@@ -6028,7 +6044,7 @@ task.spawn(function()
                     { "help", C(150, 160, 255), C(90, 100, 215), openControls },
                 }
                 local n, size, gap = #items, 40, 8
-                local x0 = (560 - (n * size + (n - 1) * gap)) / 2
+                local x0 = (DOCKW - (n * size + (n - 1) * gap)) / 2
                 for i, it in ipairs(items) do
                     local b = Instance.new("TextButton")
                     b.Position = UDim2.fromOffset(x0 + (i - 1) * (size + gap), 15)
