@@ -166,6 +166,12 @@ local function versionInfo(feed, file)
     return info
 end
 
+-- Source to queue before teleporting to a chosen server (nil if this copy was started without it).
+local function queuePayload()
+    if type(NOVR_SELF) ~= "string" or #NOVR_SELF < 1000 then return nil end
+    return "local NOVR_SELF = " .. string.format("%q", NOVR_SELF) .. "\n" .. NOVR_SELF
+end
+
 -- true on phones / tablets (Delta mobile, Android, iOS). PC keeps every original code path.
 local IS_MOBILE = false
 do
@@ -479,6 +485,7 @@ task.spawn(function()
         camView = "Normal",     -- C: Normal | Front (2nd POV) | Hands (camera follows both hands) | Left Hand | Right Hand
     }
     -- Camera views. Only YOUR screen moves: your real head stays where it is (the game never sees the camera move).
+    S.panelSize = {}   -- remembered menu sizes: slot -> { width, height }
     S.CAM_VIEWS = { "Normal", "Front", "Hands", "Left Hand", "Right Hand" }
     function S.cycleCam(to)
         if to then S.camView = to; return end
@@ -1315,8 +1322,69 @@ task.spawn(function()
     end)
     -- ...and is moved back to the third-person view after everything else ran,
     -- so only YOUR screen sees it there.
+    -- Sound: the game's voice chat is positional, and it is heard from the camera. Since your head stays where it
+    -- is while the camera rides along with a hand (or the front view), the listener is pinned to the VIEW camera
+    -- in every non-Normal view, so you hear whoever is near the camera / hand. Normal view = Roblox default.
+    local SoundService = game:GetService("SoundService")
+    local listenerPinned = false
+    -- Newer voice chat setups put their own AudioListener on the character / head, and then SetListener is ignored.
+    -- So in a non-Normal view every AudioListener the game made is moved onto an invisible part that rides on the
+    -- view camera, and is put back when you return to Normal view.
+    local viewPart
+    local movedListeners = {}   -- AudioListener -> its original parent
+    local lastListenerScan = -100
+    local function ensureViewPart()
+        if viewPart and viewPart.Parent then return viewPart end
+        viewPart = Instance.new("Part")
+        viewPart.Name = "NoVR_ListenerPart"
+        viewPart.Anchored = true
+        viewPart.CanCollide = false
+        viewPart.CanQuery = false
+        viewPart.CanTouch = false
+        viewPart.Transparency = 1
+        viewPart.Size = Vector3.new(0.2, 0.2, 0.2)
+        viewPart.Parent = workspace
+        return viewPart
+    end
+    local function scanListeners(part)
+        local n = 0
+        for _, d in ipairs(game:GetDescendants()) do
+            if d.ClassName == "AudioListener" and d.Parent ~= part and movedListeners[d] == nil then
+                movedListeners[d] = d.Parent
+                local ok = pcall(function() d.Parent = part end)
+                if ok then n = n + 1 else movedListeners[d] = nil end
+            end
+        end
+        if n > 0 then print("[NoVR] audio: moved " .. n .. " AudioListener(s) onto the view camera") end
+    end
+    local function releaseListeners()
+        for l, par in pairs(movedListeners) do
+            pcall(function()
+                if l.Parent == viewPart and par and par.Parent then l.Parent = par end
+            end)
+            movedListeners[l] = nil
+        end
+    end
     RunService:BindToRenderStep("NoVR_CamView", Enum.RenderPriority.Last.Value + 10000, function()
         cam.CFrame = camBack
+        if S.camView ~= "Normal" then
+            if not listenerPinned then
+                listenerPinned = true
+                lastListenerScan = -100
+                print("[NoVR] audio: listening from the " .. S.camView .. " camera")
+            end
+            pcall(function() SoundService:SetListener(Enum.ListenerType.CFrame, camBack) end)
+            local part = ensureViewPart()
+            part.CFrame = camBack
+            if os.clock() - lastListenerScan > 3 then
+                lastListenerScan = os.clock()
+                pcall(scanListeners, part)
+            end
+        elseif listenerPinned then
+            listenerPinned = false
+            pcall(releaseListeners)
+            pcall(function() SoundService:SetListener(Enum.ListenerType.Camera) end)
+        end
     end)
 
     -- ============ CROSSHAIR (shows where a held gun points) ============
@@ -1338,6 +1406,90 @@ task.spawn(function()
     }
     local XH_DEFAULTS = {}
     for k, v in pairs(XH) do XH_DEFAULTS[k] = v end
+
+    -- ============ AUTO SAVE ============
+    -- Settings and your last changes (hands, reach, camera view, crosshair, theme ...) are written to
+    -- NoVR_Settings.json (executor workspace folder) a moment after they change, and loaded at the next start.
+    -- Delete that file to go back to the defaults.
+    local SAVE_FILE = "NoVR_Settings.json"
+    local S_KEYS = {
+        "scale", "sens", "moveK", "slowFactor", "tpDist", "spread", "height", "handSens", "aimSens", "handRange",
+        "reachL", "reachR", "handLX", "handLY", "handRX", "handRY",
+        "aimLYaw", "aimLPitch", "aimRYaw", "aimRPitch",
+        "thirdPerson", "camView", "handMode", "aimMode",
+    }
+    local Save = { last = nil, ok = (type(writefile) == "function" and type(readfile) == "function") }
+    function Save.snapshot()
+        local d = { s = {}, xh = {}, theme = { hue = Theme.hue, size = Theme.size }, panels = S.panelSize }
+        for _, k in ipairs(S_KEYS) do d.s[k] = S[k] end
+        for k, v in pairs(XH) do
+            if k ~= "dirty" then
+                if typeof(v) == "Color3" then d.xh[k] = { v.R, v.G, v.B } else d.xh[k] = v end
+            end
+        end
+        return d
+    end
+    function Save.load()
+        if not Save.ok then return end
+        local okf, raw = pcall(function() return isfile and isfile(SAVE_FILE) and readfile(SAVE_FILE) or nil end)
+        if not (okf and type(raw) == "string" and #raw > 2) then return end
+        local HttpService = game:GetService("HttpService")
+        local okd, d = pcall(HttpService.JSONDecode, HttpService, raw)
+        if not (okd and type(d) == "table") then return end
+        if type(d.s) == "table" then
+            for _, k in ipairs(S_KEYS) do
+                local v = d.s[k]
+                if v ~= nil and type(v) == type(S[k]) then
+                    if type(v) ~= "number" or (v == v and math.abs(v) < 1e7) then S[k] = v end
+                end
+            end
+            local valid = false
+            for _, n in ipairs(S.CAM_VIEWS) do if n == S.camView then valid = true end end
+            if not valid then S.camView = "Normal" end
+        end
+        if type(d.xh) == "table" then
+            for k, v in pairs(XH) do
+                local sv = d.xh[k]
+                if k ~= "dirty" and sv ~= nil then
+                    if typeof(v) == "Color3" then
+                        if type(sv) == "table" and type(sv[1]) == "number" and type(sv[2]) == "number" and type(sv[3]) == "number" then
+                            XH[k] = Color3.new(math.clamp(sv[1], 0, 1), math.clamp(sv[2], 0, 1), math.clamp(sv[3], 0, 1))
+                        end
+                    elseif type(sv) == type(v) then
+                        XH[k] = sv
+                    end
+                end
+            end
+            XH.dirty = true
+        end
+        if type(d.panels) == "table" then
+            for slot, v in pairs(d.panels) do
+                if type(slot) == "string" and type(v) == "table" and type(v[1]) == "number" and type(v[2]) == "number"
+                   and v[1] > 100 and v[1] < 4000 and v[2] > 100 and v[2] < 4000 then
+                    S.panelSize[slot] = { v[1], v[2] }
+                end
+            end
+        end
+        if type(d.theme) == "table" then
+            pcall(Theme.set, tonumber(d.theme.hue), tonumber(d.theme.size))
+        end
+        Save.last = raw
+        print("[NoVR] loaded saved settings")
+    end
+    Save.load()
+    if Save.ok then
+        task.spawn(function()
+            local HttpService = game:GetService("HttpService")
+            while true do
+                task.wait(1.5)
+                local okE, raw = pcall(HttpService.JSONEncode, HttpService, Save.snapshot())
+                if okE and raw ~= Save.last then
+                    if pcall(writefile, SAVE_FILE, raw) then Save.last = raw end
+                end
+            end
+        end)
+    end
+    -- ===================================
 
     local AXES = {
         Forward = function(cf) return cf.LookVector end,
@@ -2970,6 +3122,13 @@ task.spawn(function()
                 bar(0.5, 0.5, 0.7, 0.12)
                 bar(0.14, 0.5, 0.2, 0.2)
                 bar(0.86, 0.5, 0.2, 0.2)
+            elseif kind == "server" then
+                bar(0.5, 0.2, 0.8, 0.2)
+                bar(0.5, 0.5, 0.8, 0.2)
+                bar(0.5, 0.8, 0.8, 0.2)
+                bar(0.78, 0.2, 0.1, 0.1)
+                bar(0.78, 0.5, 0.1, 0.1)
+                bar(0.78, 0.8, 0.1, 0.1)
             elseif kind == "tp" then
                 ring(0.5, 0.5, 0.8, 3)
                 bar(0.5, 0.5, 0.22, 0.22)
@@ -3287,8 +3446,8 @@ task.spawn(function()
         -- ==============================================
 
         -- ============ DISCORD: invite button + player role ============
-        local DISCORD_INVITE = "https://discord.gg/R3EvX32MDR"
-        local DISCORD_CODE   = "R3EvX32MDR"
+        local DISCORD_INVITE = "https://discord.gg/fnnXjMx22b"
+        local DISCORD_CODE   = "fnnXjMx22b"
         local HttpSvcD       = game:GetService("HttpService")
 
         local function rawGet(url)
@@ -3590,6 +3749,13 @@ task.spawn(function()
                     halo.Position = UDim2.fromOffset(nx - 4, ny - 4)
                     glow.Position = UDim2.fromOffset(nx - 6, ny - 6)
                 end
+                -- resizes the panel and its shadow / glow together
+                ent.resize = function(nw, nh)
+                    p.Size = UDim2.fromOffset(nw, nh)
+                    sh.Size = UDim2.fromOffset(nw, nh)
+                    halo.Size = UDim2.fromOffset(nw + 8, nh + 8)
+                    glow.Size = UDim2.fromOffset(nw + 12, nh + 12)
+                end
                 local grip = Instance.new("TextButton")
                 grip.Name = "Grip"
                 grip.Text = ""
@@ -3676,7 +3842,55 @@ task.spawn(function()
                 return p, ent
             end
 
-            local main = makePanel(0, 0, MAINW, PH, "Panel", 0)
+            local main, mainEnt = makePanel(0, 0, MAINW, PH, "Panel", 0)
+            -- resize handle for the whole Start Menu (same setting as Settings > Menu size, saved with it)
+            do
+                local rh = Instance.new("TextButton")
+                rh.Name = "Resize"
+                rh.AnchorPoint = Vector2.new(1, 1)
+                rh.Position = UDim2.new(1, -4, 1, -4)
+                rh.Size = UDim2.fromOffset(24, 24)
+                rh.AutoButtonColor = false
+                rh.BackgroundTransparency = 1
+                rh.Text = ""
+                rh.ZIndex = 12
+                rh.Parent = main
+                for i = 1, 2 do
+                    local line = Instance.new("Frame")
+                    line.AnchorPoint = Vector2.new(0.5, 0.5)
+                    line.Position = UDim2.new(0.5, 3 + (i - 1) * 4, 0.5, 3 + (i - 1) * 4)
+                    line.Size = UDim2.fromOffset(i == 1 and 14 or 8, 2)
+                    line.Rotation = -45
+                    line.BackgroundColor3 = WHITE
+                    line.BackgroundTransparency = 0.45
+                    line.BorderSizePixel = 0
+                    line.ZIndex = 13
+                    line.Active = false
+                    line.Parent = rh
+                end
+                rh.InputBegan:Connect(function(input)
+                    if not isPress(input) then return end
+                    local center = wrap.AbsolutePosition + wrap.AbsoluteSize / 2   -- the menu scales around its centre
+                    local d0 = math.max((sp(input) - center).Magnitude, 20)
+                    local s0 = Theme.size
+                    local conns = {}
+                    local function stop()
+                        if #conns == 0 then return end
+                        for _, c in ipairs(conns) do c:Disconnect() end
+                        conns = {}
+                        Theme.set(nil, Theme.size)
+                    end
+                    conns[1] = RunService.RenderStepped:Connect(function()
+                        local d = (sp(input) - center).Magnitude
+                        Theme.size = math.clamp(s0 * d / d0, 0.6, 1.4)   -- cheap while dragging; listeners run once on release
+                        refit(true)
+                    end)
+                    conns[2] = UIS.InputEnded:Connect(function(io) if io == input then stop() end end)
+                    conns[3] = input.Changed:Connect(function()
+                        if input.UserInputState == Enum.UserInputState.End or input.UserInputState == Enum.UserInputState.Cancel then stop() end
+                    end)
+                end)
+            end
             local dock = makePanel(135, PH + 22, 560, 62, "Dock", 0.2)
             local side = makePanel(MAINW + 14, 90, 246, 360, "Side", 0.12)
 
@@ -3746,14 +3960,75 @@ task.spawn(function()
             -- generic overlay: panel + title + close button. Calling it again
             -- while it is open closes it (toggle).
             local function overlay(slot, x, y, w, h, name, title)
-                for _, other in ipairs({ "controls", "settings", "crosshair", "teleport", "profile" }) do
+                for _, other in ipairs({ "controls", "settings", "crosshair", "teleport", "profile", "servers" }) do
                     if other ~= slot and me[other] and not me[other].closed then
                         me[other].close(); me[other] = nil
                     end
                 end
                 if me[slot] and not me[slot].closed then me[slot].close(); me[slot] = nil; return nil end
+                local defW, defH = w, h
+                local fixed = false
+                local minW, minH = math.max(340, math.floor(defW * 0.75)), math.max(300, math.floor(defH * 0.75))
+                if slot == "profile" then minW = defW end
+                if not fixed and type(S.panelSize) == "table" and type(S.panelSize[slot]) == "table" then
+                    local sw, sh2 = tonumber(S.panelSize[slot][1]), tonumber(S.panelSize[slot][2])
+                    if sw and sh2 then
+                        local v = cam.ViewportSize
+                        local k = math.max(fit.Scale, 0.01)
+                        w = math.clamp(sw, minW, math.max(minW, v.X / k - x - 8))
+                        h = math.clamp(sh2, minH, math.max(minH, v.Y / k - y - 30))
+                    end
+                end
                 local p, ent = makePanel(x, y, w, h, name, 0)
                 me[slot] = ent
+                ent.defW, ent.defH, ent.w, ent.h, ent.minW, ent.minH = defW, defH, w, h, minW, minH
+                ent.stretchList = {}
+                -- Call after setting the instance's offset Size: the panel grows / shrinks it together with itself.
+                -- kw / kh = how much of the width / height change it takes (1 = all of it).
+                function ent.stretchAdd(inst, kw, kh)
+                    local rec = { inst = inst, w = inst.Size.X.Offset, h = inst.Size.Y.Offset, kw = kw or 0, kh = kh or 0 }
+                    ent.stretchList[#ent.stretchList + 1] = rec
+                    local dw, dh = ent.w - ent.defW, ent.h - ent.defH
+                    inst.Size = UDim2.fromOffset(math.max(rec.w + dw * rec.kw, 40), math.max(rec.h + dh * rec.kh, 40))
+                end
+                -- For menus laid out with fixed positions: moves everything below topY into a scrolling area that
+                -- stretches with the menu, so a smaller menu scrolls instead of cutting off / overlapping buttons.
+                function ent.scrollify(topY)
+                    local body = Instance.new("ScrollingFrame")
+                    body.Name = "Body"
+                    body.Position = UDim2.fromOffset(0, topY)
+                    body.Size = UDim2.fromOffset(ent.defW, ent.defH - topY)
+                    body.BackgroundTransparency = 1
+                    body.BorderSizePixel = 0
+                    body.ScrollBarThickness = 4
+                    body.ScrollingDirection = Enum.ScrollingDirection.Y
+                    body.CanvasSize = UDim2.new()
+                    body.ZIndex = 2
+                    body.Parent = p
+                    local bottom = 0
+                    for _, c in ipairs(p:GetChildren()) do
+                        if c:IsA("GuiObject") and c ~= body and c.Name ~= "Bg" and c.Name ~= "Grip" and c.Name ~= "Resize"
+                           and c.AnchorPoint.Y == 0 and c.Position.Y.Scale == 0 and c.Position.Y.Offset >= topY then
+                            local ny = c.Position.Y.Offset - topY
+                            c.Position = UDim2.new(c.Position.X.Scale, c.Position.X.Offset, 0, ny)
+                            bottom = math.max(bottom, ny + c.Size.Y.Offset)
+                            c.Parent = body
+                        end
+                    end
+                    body.CanvasSize = UDim2.fromOffset(0, bottom + 14)
+                    ent.stretchAdd(body, 1, 1)
+                end
+                function ent.applySize(nw, nh)
+                    ent.w, ent.h = nw, nh
+                    ent.resize(nw, nh)
+                    local dw, dh = nw - ent.defW, nh - ent.defH
+                    for _, r in ipairs(ent.stretchList) do
+                        if r.inst.Parent then
+                            r.inst.Size = UDim2.fromOffset(math.max(r.w + dw * r.kw, 40), math.max(r.h + dh * r.kh, 40))
+                        end
+                    end
+                    if ent.onResize then ent.onResize(nw, nh) end
+                end
                 p.Active = true
                 local bgf = p:FindFirstChild("Bg")
                 if bgf then bgf.Active = true end
@@ -3781,18 +4056,73 @@ task.spawn(function()
                 cb.InputBegan:Connect(function(io) if isPress(io) then tw(csc, 0.1, { Scale = 0.9 }) end end)
                 cb.InputEnded:Connect(function(io) if isPress(io) then tw(csc, 0.4, { Scale = 1 }, Enum.EasingStyle.Back) end end)
                 cb.Activated:Connect(function() ent.close(); me[slot] = nil end)
+
+                -- resize handle (bottom-right corner): drag to make the menu bigger / smaller
+                if not fixed then
+                    local rh = Instance.new("TextButton")
+                    rh.Name = "Resize"
+                    rh.AnchorPoint = Vector2.new(1, 1)
+                    rh.Position = UDim2.new(1, -4, 1, -4)
+                    rh.Size = UDim2.fromOffset(24, 24)
+                    rh.AutoButtonColor = false
+                    rh.BackgroundTransparency = 1
+                    rh.Text = ""
+                    rh.ZIndex = 12
+                    rh.Parent = p
+                    for i = 1, 2 do
+                        local line = Instance.new("Frame")
+                        line.AnchorPoint = Vector2.new(0.5, 0.5)
+                        line.Position = UDim2.new(0.5, 3 + (i - 1) * 4, 0.5, 3 + (i - 1) * 4)
+                        line.Size = UDim2.fromOffset(i == 1 and 14 or 8, 2)
+                        line.Rotation = -45
+                        line.BackgroundColor3 = WHITE
+                        line.BackgroundTransparency = 0.45
+                        line.BorderSizePixel = 0
+                        line.ZIndex = 13
+                        line.Active = false
+                        line.Parent = rh
+                    end
+                    rh.InputBegan:Connect(function(input)
+                        if not isPress(input) then return end
+                        local from = sp(input)
+                        local w0, h0 = ent.w, ent.h
+                        local conns = {}
+                        local function stop()
+                            if #conns == 0 then return end
+                            for _, c in ipairs(conns) do c:Disconnect() end
+                            conns = {}
+                            S.panelSize = S.panelSize or {}
+                            S.panelSize[slot] = { math.floor(ent.w), math.floor(ent.h) }
+                        end
+                        conns[1] = RunService.RenderStepped:Connect(function()
+                            if ent.closed then stop() return end
+                            local k = math.max(fit.Scale, 0.01)
+                            local d = (sp(input) - from) / k
+                            local v = cam.ViewportSize
+                            local ap = p.AbsolutePosition
+                            local maxW = math.max(ent.minW, (v.X - ap.X) / k - 8)
+                            local maxH = math.max(ent.minH, (v.Y - ap.Y) / k - 30)
+                            ent.applySize(math.clamp(w0 + d.X, ent.minW, maxW), math.clamp(h0 + d.Y, ent.minH, maxH))
+                        end)
+                        conns[2] = UIS.InputEnded:Connect(function(io) if io == input then stop() end end)
+                        conns[3] = input.Changed:Connect(function()
+                            if input.UserInputState == Enum.UserInputState.End or input.UserInputState == Enum.UserInputState.Cancel then stop() end
+                        end)
+                    end)
+                end
                 return p, ent
             end
 
             -- ---------- CONTROLS panel (PC / Mobile tabs) ----------
             local function openControls()
-                local p = overlay("controls", 20, 20, 530, 400, "Controls", "All controls")
+                local p, ent = overlay("controls", 20, 20, 530, 400, "Controls", "All controls")
                 if not p then return end
 
                 local tabs = {}
                 local sc = Instance.new("ScrollingFrame")
                 sc.Position = UDim2.fromOffset(16, 96)
                 sc.Size = UDim2.fromOffset(498, 290)
+                ent.stretchAdd(sc, 1, 1)
                 sc.BackgroundTransparency = 1
                 sc.BorderSizePixel = 0
                 sc.ScrollBarThickness = 4
@@ -3935,7 +4265,7 @@ task.spawn(function()
                 { "Orange", 0.08 }, { "Red", 0.99 }, { "Pink", 0.88 },
             }
             local function openSettings()
-                local p = overlay("settings", 110, 40, 350, 360, "Settings", "Settings")
+                local p, ent = overlay("settings", 110, 40, 350, 360, "Settings", "Settings")
                 if not p then return end
 
                 lbl(p, "Menu colour", 20, 58, 200, 18, 12, MUTED)
@@ -4007,17 +4337,19 @@ task.spawn(function()
                 end)
 
                 lbl(p, "Size also scales the touch HUD and the PC menu.", 20, 324, 310, 20, 10, MUTED)
+                ent.scrollify(50)
                 Theme.recolor(p)
             end
 
             -- ---------- CROSSHAIR panel (style, size, colour, aim direction ...) ----------
             local function openCrosshair()
-                local p = overlay("crosshair", 55, 20, 420, 400, "Crosshair", "Crosshair settings")
+                local p, ent = overlay("crosshair", 55, 20, 420, 400, "Crosshair", "Crosshair settings")
                 if not p then return end
 
                 local sc = Instance.new("ScrollingFrame")
                 sc.Position = UDim2.fromOffset(12, 56)
                 sc.Size = UDim2.fromOffset(396, 332)
+                ent.stretchAdd(sc, 1, 1)
                 sc.BackgroundTransparency = 1
                 sc.BorderSizePixel = 0
                 sc.ScrollBarThickness = 4
@@ -4156,12 +4488,13 @@ task.spawn(function()
 
             -- ---------- TELEPORT panel (jump your camera / head to another VR player) ----------
             local function openTeleport()
-                local p = overlay("teleport", 100, 30, 380, 380, "Teleport", "Teleport to player")
+                local p, ent = overlay("teleport", 100, 30, 380, 380, "Teleport", "Teleport to player")
                 if not p then return end
 
                 local sc = Instance.new("ScrollingFrame")
                 sc.Position = UDim2.fromOffset(12, 96)
                 sc.Size = UDim2.fromOffset(356, 270)
+                ent.stretchAdd(sc, 1, 1)
                 sc.BackgroundTransparency = 1
                 sc.BorderSizePixel = 0
                 sc.ScrollBarThickness = 4
@@ -4257,14 +4590,400 @@ task.spawn(function()
                 Theme.recolor(p)
             end
 
+
+            -- ---------- SERVER BROWSER panel (servers of THIS game + join a friend) ----------
+            local function openServers()
+                local p, ent = overlay("servers", 50, 10, 460, 440, "Servers", "Server browser")
+                if not p then return end
+                local HttpService     = game:GetService("HttpService")
+                local TeleportService = game:GetService("TeleportService")
+                local req = (syn and syn.request) or http_request or request or (fluxus and fluxus.request)
+                local tab, mode = "servers", "fast"
+                local joining = false
+                local friends, friendsErr = nil, nil
+                local lastList, lastMode = {}, nil
+
+                local function mkBtn(text, x, y, w, h, size)
+                    local b = Instance.new("TextButton")
+                    b.Position = UDim2.fromOffset(x, y)
+                    b.Size = UDim2.fromOffset(w, h)
+                    b.AutoButtonColor = false
+                    b.BackgroundColor3 = PINK
+                    b.BackgroundTransparency = 0.8
+                    b.BorderSizePixel = 0
+                    b.Text = text
+                    b.Font = Enum.Font.GothamBold
+                    b.TextSize = size or 12
+                    b.TextColor3 = WHITE
+                    b.ZIndex = 5
+                    b.Parent = p
+                    corner(b, 9)
+                    b.InputBegan:Connect(function(io) if isPress(io) then ripple(b, io, fit.Scale) end end)
+                    return b
+                end
+
+                local tabS = mkBtn("SERVERS", 20, 56, 120, 28)
+                local tabF = mkBtn("FRIENDS", 148, 56, 120, 28)
+                local rf   = mkBtn("REFRESH", 0, 14, 70, 28, 11)
+                rf.Position = UDim2.new(1, -120, 0, 14)
+                rf.BackgroundTransparency = 0.35
+                rf.ZIndex = 9
+
+                -- servers tab controls
+                local rejoinB = mkBtn("REJOIN", 20, 94, 205, 30)
+                local hopB    = mkBtn("SERVER HOP", 235, 94, 205, 30)
+                local mFast   = mkBtn("FAST", 20, 132, 136, 28)
+                local mHigh   = mkBtn("HIGHEST", 162, 132, 136, 28)
+                local mLow    = mkBtn("LOWEST", 304, 132, 136, 28)
+                -- friends tab control
+                local box = Instance.new("TextBox")
+                box.Position = UDim2.fromOffset(20, 94)
+                box.Size = UDim2.fromOffset(420, 30)
+                box.BackgroundColor3 = PINK
+                box.BackgroundTransparency = 0.85
+                box.BorderSizePixel = 0
+                box.Text = ""
+                box.PlaceholderText = "Search a friend by name..."
+                box.PlaceholderColor3 = MUTED
+                box.ClearTextOnFocus = false
+                box.Font = Enum.Font.GothamMedium
+                box.TextSize = 12
+                box.TextColor3 = WHITE
+                box.TextXAlignment = Enum.TextXAlignment.Left
+                box.ZIndex = 5
+                box.Parent = p
+                corner(box, 9)
+                local bpad = Instance.new("UIPadding"); bpad.PaddingLeft = UDim.new(0, 12); bpad.Parent = box
+
+                local status = lbl(p, "", 20, 166, 420, 16, 11, MUTED, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+
+                local sc = Instance.new("ScrollingFrame")
+                sc.BackgroundTransparency = 1
+                sc.BorderSizePixel = 0
+                sc.ScrollBarThickness = 4
+                sc.CanvasSize = UDim2.new()
+                sc.AutomaticCanvasSize = Enum.AutomaticSize.Y
+                sc.ScrollingDirection = Enum.ScrollingDirection.Y
+                sc.Parent = p
+                local ll = Instance.new("UIListLayout")
+                ll.Padding = UDim.new(0, 6)
+                ll.SortOrder = Enum.SortOrder.LayoutOrder
+                ll.Parent = sc
+
+                local function clearList()
+                    for _, c in ipairs(sc:GetChildren()) do
+                        if c:IsA("GuiObject") then c:Destroy() end
+                    end
+                    sc.CanvasPosition = Vector2.zero
+                end
+
+                -- lay everything out for the panel's current size (called on every resize)
+                local function relayout(nw, nh)
+                    local inner = nw - 40
+                    local half = (inner - 10) / 2
+                    rejoinB.Size = UDim2.fromOffset(half, 30)
+                    hopB.Position = UDim2.fromOffset(20 + half + 10, 94)
+                    hopB.Size = UDim2.fromOffset(half, 30)
+                    local mw = (inner - 16) / 3
+                    mFast.Size = UDim2.fromOffset(mw, 28)
+                    mHigh.Position = UDim2.fromOffset(20 + mw + 8, 132)
+                    mHigh.Size = UDim2.fromOffset(mw, 28)
+                    mLow.Position = UDim2.fromOffset(20 + (mw + 8) * 2, 132)
+                    mLow.Size = UDim2.fromOffset(mw, 28)
+                    box.Size = UDim2.fromOffset(inner, 30)
+                    status.Size = UDim2.fromOffset(inner, 16)
+                    local top = (tab == "servers") and 188 or 154
+                    sc.Size = UDim2.fromOffset(nw - 24, math.max(nh - top - 12, 60))
+                end
+                ent.onResize = relayout
+
+                local function getJson(url)
+                    local body
+                    local ok, res = pcall(function() return game:HttpGet(url, true) end)
+                    if ok and type(res) == "string" and #res > 0 then body = res end
+                    if not body and req then
+                        local ok2, r = pcall(req, { Url = url, Method = "GET" })
+                        if ok2 and r then
+                            if r.StatusCode == 429 then return nil, "rate" end
+                            if r.Success or r.StatusCode == 200 then body = r.Body end
+                        end
+                    end
+                    if not body then return nil, "fail" end
+                    local ok3, data = pcall(HttpService.JSONDecode, HttpService, body)
+                    if not (ok3 and type(data) == "table") then return nil, "fail" end
+                    if data.errors then return nil, "rate" end
+                    return data
+                end
+
+                local function fetchServers(order, pages)
+                    local out, cursor = {}, nil
+                    for _ = 1, pages do
+                        local url = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder="
+                            .. order .. "&limit=100" .. (cursor and ("&cursor=" .. cursor) or "")
+                        local data, why = getJson(url)
+                        if not data then return out, why end
+                        for _, sv in ipairs(data.data or {}) do out[#out + 1] = sv end
+                        cursor = data.nextPageCursor
+                        if not cursor then break end
+                        task.wait(0.4)
+                    end
+                    return out
+                end
+
+                -- fast = lowest ping (full servers hidden) | highest = most players (full ones too) | lowest = fewest players
+                local function arrange(list, m)
+                    local r = {}
+                    for _, sv in ipairs(list) do
+                        if type(sv) == "table" and sv.id and sv.id ~= game.JobId and tonumber(sv.playing) and tonumber(sv.maxPlayers) then
+                            if m ~= "fast" or sv.playing < sv.maxPlayers then r[#r + 1] = sv end
+                        end
+                    end
+                    if m == "fast" then
+                        table.sort(r, function(a, b) return (tonumber(a.ping) or 1e9) < (tonumber(b.ping) or 1e9) end)
+                    elseif m == "highest" then
+                        table.sort(r, function(a, b) return a.playing > b.playing end)
+                    else
+                        table.sort(r, function(a, b) return a.playing < b.playing end)
+                    end
+                    while #r > 60 do r[#r] = nil end
+                    return r
+                end
+
+                local failConn
+                local function joinServer(placeId, jobId, label, sameGame)
+                    if joining then return end
+                    joining = true
+                    status.Text = "Joining " .. label .. "..."
+                    local payload = queuePayload()
+                    if sameGame and EXEC.queue and payload then
+                        pcall(EXEC.queue, payload)
+                    elseif sameGame and not EXEC.queue then
+                        status.Text = "Joining " .. label .. " (this executor can't carry the script across)..."
+                    end
+                    local ok, err = pcall(function() TeleportService:TeleportToPlaceInstance(placeId, jobId, lp) end)
+                    if not ok then
+                        joining = false
+                        status.Text = "Join failed: " .. tostring(err):sub(1, 60)
+                    end
+                    task.delay(20, function() joining = false end)
+                end
+                failConn = TeleportService.TeleportInitFailed:Connect(function(_, result, msg)
+                    if ent.closed then failConn:Disconnect() return end
+                    joining = false
+                    status.Text = "Join failed: " .. tostring(msg ~= "" and msg or result):sub(1, 60)
+                end)
+
+                local function newRow(i, h)
+                    local f = Instance.new("Frame")
+                    f.LayoutOrder = i
+                    f.Size = UDim2.new(1, -8, 0, h)
+                    f.BackgroundColor3 = PINK
+                    f.BackgroundTransparency = 0.82
+                    f.BorderSizePixel = 0
+                    f.Parent = sc
+                    corner(f, 10)
+                    return f
+                end
+                local function joinBtn(f, text, enabled, action)
+                    local b = Instance.new("TextButton")
+                    b.AnchorPoint = Vector2.new(1, 0.5)
+                    b.Position = UDim2.new(1, -10, 0.5, 0)
+                    b.Size = UDim2.fromOffset(70, 28)
+                    b.AutoButtonColor = false
+                    b.BackgroundColor3 = PINK
+                    b.BackgroundTransparency = enabled and 0.1 or 0.85
+                    b.BorderSizePixel = 0
+                    b.Text = text
+                    b.Font = Enum.Font.GothamBold
+                    b.TextSize = 12
+                    b.TextColor3 = WHITE
+                    b.ZIndex = 5
+                    b.Parent = f
+                    corner(b, 8)
+                    if enabled then
+                        b.InputBegan:Connect(function(io) if isPress(io) then ripple(b, io, fit.Scale) end end)
+                        b.Activated:Connect(action)
+                    end
+                end
+                local function pingColor(ms)
+                    if not ms then return "#c4b8f0" end
+                    if ms < 90 then return "#8dffbd" elseif ms < 160 then return "#ffd36b" end
+                    return "#ff8a8a"
+                end
+
+                local function renderServers(list)
+                    clearList()
+                    for i, sv in ipairs(list) do
+                        local f = newRow(i, 54)
+                        local ms = tonumber(sv.ping)
+                        local t = lbl(f, "", 14, 8, 280, 18, 12, WHITE, Enum.Font.GothamBold)
+                        t.RichText = true
+                        t.Text = ("%d/%d players  <font color=\"%s\">-  %s</font>"):format(
+                            sv.playing, sv.maxPlayers, pingColor(ms), ms and (math.floor(ms + 0.5) .. "ms") or "--")
+                        local track = Instance.new("Frame")
+                        track.Position = UDim2.fromOffset(14, 36)
+                        track.Size = UDim2.new(1, -112, 0, 5)
+                        track.BackgroundColor3 = WHITE
+                        track.BackgroundTransparency = 0.88
+                        track.BorderSizePixel = 0
+                        track.Parent = f
+                        corner(track, 3)
+                        local fill = Instance.new("Frame")
+                        fill.Size = UDim2.fromScale(math.clamp(sv.playing / math.max(sv.maxPlayers, 1), 0.03, 1), 1)
+                        fill.BackgroundColor3 = PINK
+                        fill.BorderSizePixel = 0
+                        fill.Parent = track
+                        corner(fill, 3)
+                        local full = sv.playing >= sv.maxPlayers
+                        joinBtn(f, full and "Full" or "Join", not full, function()
+                            joinServer(game.PlaceId, sv.id, sv.playing .. "/" .. sv.maxPlayers .. " server", true)
+                        end)
+                    end
+                    Theme.recolor(sc)
+                end
+
+                local busy = false
+                local function loadServers(force)
+                    if busy then return end
+                    busy = true
+                    local m = mode
+                    status.Text = "Loading servers..."
+                    clearList()
+                    task.spawn(function()
+                        local order, pages = "Desc", 1
+                        if m == "fast" then pages = 3 elseif m == "lowest" then order = "Asc" end
+                        local raw, why = fetchServers(order, pages)
+                        busy = false
+                        if ent.closed or tab ~= "servers" or m ~= mode then
+                            if not ent.closed and tab == "servers" and m ~= mode then loadServers() end
+                            return
+                        end
+                        lastList = arrange(raw, m)
+                        if #lastList == 0 then
+                            status.Text = (why == "rate") and "Roblox is rate limiting - wait a few seconds and press REFRESH."
+                                or (why and "Couldn't load servers (HttpGet / request blocked?)." or "No servers found.")
+                        else
+                            status.Text = #lastList .. " servers found" .. (why == "rate" and " (partial - rate limited)" or "")
+                        end
+                        renderServers(lastList)
+                    end)
+                end
+
+                local function renderFriends()
+                    clearList()
+                    if friendsErr then status.Text = friendsErr; return end
+                    if not friends then status.Text = "Loading friends..."; return end
+                    local q = string.lower(box.Text or "")
+                    local list, online = {}, 0
+                    for _, f in ipairs(friends) do
+                        if f.IsOnline then online += 1 end
+                        local inGame = f.GameId and tostring(f.GameId) ~= "" and f.PlaceId
+                        if inGame then
+                            local nm = string.lower(tostring(f.UserName or "") .. " " .. tostring(f.DisplayName or ""))
+                            if q == "" or string.find(nm, q, 1, true) then list[#list + 1] = f end
+                        end
+                    end
+                    table.sort(list, function(a, b)
+                        local sa, sb = a.PlaceId == game.PlaceId, b.PlaceId == game.PlaceId
+                        if sa ~= sb then return sa end
+                        return string.lower(tostring(a.DisplayName)) < string.lower(tostring(b.DisplayName))
+                    end)
+                    status.Text = #list .. " joinable friend" .. (#list == 1 and "" or "s") .. "  (" .. online .. " online)"
+                    for i, f in ipairs(list) do
+                        local row = newRow(i, 50)
+                        local same = f.PlaceId == game.PlaceId
+                        lbl(row, tostring(f.DisplayName or f.UserName) .. "  (@" .. tostring(f.UserName) .. ")", 14, 7, 270, 18, 12, WHITE, Enum.Font.GothamBold)
+                        lbl(row, same and "In this game" or ("In: " .. tostring(f.LastLocation or "another game")), 14, 27, 270, 16, 11, MUTED, Enum.Font.GothamMedium)
+                        joinBtn(row, "Join", true, function()
+                            joinServer(f.PlaceId, tostring(f.GameId), tostring(f.DisplayName or f.UserName), same)
+                        end)
+                    end
+                    Theme.recolor(sc)
+                end
+
+                local function loadFriends()
+                    friends, friendsErr = nil, nil
+                    renderFriends()
+                    task.spawn(function()
+                        local ok, list = pcall(function() return lp:GetFriendsOnline(200) end)
+                        if ent.closed then return end
+                        if ok and type(list) == "table" then friends = list
+                        else friends, friendsErr = {}, "Couldn't read your friends list on this executor." end
+                        if tab == "friends" then renderFriends() end
+                    end)
+                end
+                box:GetPropertyChangedSignal("Text"):Connect(function() if tab == "friends" then renderFriends() end end)
+
+                local function setTab(t)
+                    tab = t
+                    relayout(ent.w, ent.h)
+                    local srv = (t == "servers")
+                    for _, o in ipairs({ rejoinB, hopB, mFast, mHigh, mLow }) do o.Visible = srv end
+                    box.Visible = not srv
+                    tabS.BackgroundTransparency = srv and 0.15 or 0.8
+                    tabF.BackgroundTransparency = srv and 0.8 or 0.15
+                    if srv then
+                        status.Position = UDim2.fromOffset(20, 166)
+                        sc.Position = UDim2.fromOffset(12, 188)
+                        loadServers()
+                    else
+                        status.Position = UDim2.fromOffset(20, 132)
+                        sc.Position = UDim2.fromOffset(12, 154)
+                        if friends == nil and not friendsErr then loadFriends() else renderFriends() end
+                    end
+                end
+                local function setMode(m)
+                    mode = m
+                    mFast.BackgroundTransparency = (m == "fast") and 0.15 or 0.8
+                    mHigh.BackgroundTransparency = (m == "highest") and 0.15 or 0.8
+                    mLow.BackgroundTransparency  = (m == "lowest") and 0.15 or 0.8
+                    if tab == "servers" then loadServers() end
+                end
+
+                tabS.Activated:Connect(function() setTab("servers") end)
+                tabF.Activated:Connect(function() setTab("friends") end)
+                mFast.Activated:Connect(function() setMode("fast") end)
+                mHigh.Activated:Connect(function() setMode("highest") end)
+                mLow.Activated:Connect(function() setMode("lowest") end)
+                rf.Activated:Connect(function()
+                    if tab == "servers" then loadServers() else friends = nil; friendsErr = nil; loadFriends() end
+                end)
+                rejoinB.Activated:Connect(function()
+                    if game.JobId == "" then status.Text = "No server id (Studio?)."; return end
+                    joinServer(game.PlaceId, game.JobId, "this server again", true)
+                end)
+                hopB.Activated:Connect(function()
+                    if joining or busy then return end
+                    busy = true
+                    status.Text = "Finding a server..."
+                    task.spawn(function()
+                        local raw, why = fetchServers("Desc", 2)
+                        busy = false
+                        if ent.closed then return end
+                        local list = arrange(raw, "fast")
+                        if #list == 0 then
+                            status.Text = (why == "rate") and "Rate limited - try again in a few seconds." or "No other server found."
+                            return
+                        end
+                        local pick = list[math.random(1, math.min(#list, 15))]   -- one of the 15 lowest-ping servers
+                        joinServer(game.PlaceId, pick.id, "a new server", true)
+                    end)
+                end)
+
+                setMode("fast")
+                setTab("servers")
+                Theme.recolor(p)
+            end
+
             -- ---------- PROFILE panel (your Roblox profile info) ----------
             local function openProfile()
-                local root = overlay("profile", 75, 8, 430, 432, "Profile", "My Roblox profile")
+                local root, pent = overlay("profile", 75, 8, 430, 432, "Profile", "My Roblox profile")
                 if not root then return end
                 -- page 1 (profile) is built into `p`; page 2 (status) is built into `stp` further down
                 local p = Instance.new("Frame")
                 p.Position = UDim2.fromOffset(0, 30)
                 p.Size = UDim2.fromOffset(430, 400)
+                pent.stretchAdd(p, 1, 1)
                 p.BackgroundTransparency = 1
                 p.BorderSizePixel = 0
                 p.Parent = root
@@ -4325,6 +5044,7 @@ task.spawn(function()
                 local sc = Instance.new("ScrollingFrame")
                 sc.Position = UDim2.fromOffset(16, 142)
                 sc.Size = UDim2.fromOffset(398, 246)
+                pent.stretchAdd(sc, 1, 1)
                 sc.BackgroundTransparency = 1
                 sc.BorderSizePixel = 0
                 sc.ScrollBarThickness = 4
@@ -4489,6 +5209,7 @@ task.spawn(function()
                 local stp = Instance.new("Frame")
                 stp.Position = UDim2.fromOffset(0, 30)
                 stp.Size = UDim2.fromOffset(430, 400)
+                pent.stretchAdd(stp, 1, 1)
                 stp.BackgroundTransparency = 1
                 stp.BorderSizePixel = 0
                 stp.Visible = false
@@ -4517,6 +5238,13 @@ task.spawn(function()
                 rf.Parent = root
                 corner(rf, 8)
                 rf.InputBegan:Connect(function(io) if isPress(io) then ripple(rf, io, fit.Scale) end end)
+                -- the REFRESH button and its "Updated" text stay on the right edge when the menu is widened
+                pent.onResize = function(nw)
+                    local dw = nw - pent.defW
+                    rf.Position = UDim2.fromOffset(340 + dw, 48)
+                    statusL.Position = UDim2.fromOffset(250 + dw, 52)
+                end
+                pent.onResize(pent.w, pent.h)
 
                 local function selectTab(key)
                     p.Visible = key == "profile"
@@ -4600,6 +5328,7 @@ task.spawn(function()
                     local ssc = Instance.new("ScrollingFrame")
                     ssc.Position = UDim2.fromOffset(12, 52)
                     ssc.Size = UDim2.fromOffset(406, 340)
+                    pent.stretchAdd(ssc, 1, 1)
                     ssc.BackgroundTransparency = 1
                     ssc.BorderSizePixel = 0
                     ssc.ScrollBarThickness = 4
@@ -4932,6 +5661,7 @@ task.spawn(function()
                 { "Hand reach",           "Wheel (+ LMB / RMB)", "reach", "reach wheel distance zoom hand left right lmb rmb" },
                 { "Third person",         "P, zoom I / O",      "person", "third person camera zoom p i o" },
                 { "Camera views",         "C (cycle), zoom I / O", "reach", "camera view c second pov 2nd front hand pov follow" },
+                { "Server browser",       "Dock: server icon",  "server", "server browser join friend servers ping fast highest lowest hop rejoin" },
                 { "Hand mode",            "N, reset with B",    "hand", "hand mode n reset b" },
             }
             local rows = {}
@@ -5226,6 +5956,7 @@ task.spawn(function()
                     end, function() return hudApi.mobileOpen and hudApi.mobileOpen() end },
                     { "cross", C(120, 255, 170), C(40, 170, 110), openCrosshair, function() return XH.enabled end },
                     { "tp", C(255, 200, 90), C(230, 120, 70), openTeleport },
+                    { "server", C(110, 190, 255), C(70, 100, 235), openServers },
                     { "help", C(150, 160, 255), C(90, 100, 215), openControls },
                 }
                 local n, size, gap = #items, 40, 8
@@ -6385,8 +7116,14 @@ task.spawn(function()
 end)
 ]==]
 
+-- The queued copy carries its own source as NOVR_SELF, so the Server Browser / Join Friend buttons can queue
+-- the script again before teleporting to a specific server (a plain rejoin would pick a random one).
+local function wrapSelf(src)
+    return "local NOVR_SELF = " .. string.format("%q", src) .. "\n" .. src
+end
+
 if C.queue then
-    C.queue(hrs)
+    C.queue(wrapSelf(hrs))
     pcall(function()
         game:GetService("StarterGui"):SetCore("SendNotification", {
             Title = "VR Hands",
@@ -6398,7 +7135,7 @@ if C.queue then
 else
     -- no way to carry the script across a teleport, so just run it now
     task.spawn(function()
-        local f, err = (C.loadstring or loadstring or load)(hrs)
+        local f, err = (C.loadstring or loadstring or load)(wrapSelf(hrs))
         if f then
             local ok, e = pcall(f)
             if not ok then warn("[VR Hands No-VR] " .. tostring(e)) end
