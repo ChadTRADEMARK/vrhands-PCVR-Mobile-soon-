@@ -486,6 +486,8 @@ task.spawn(function()
     }
     -- Camera views. Only YOUR screen moves: your real head stays where it is (the game never sees the camera move).
     S.panelSize = {}   -- remembered menu sizes: slot -> { width, height }
+    S.panelScale = {}  -- remembered scale of the Start Menu's Main / Dock / Side panels
+    S.hudZoom = 1      -- size of the on-screen controls text (RightCtrl), changed by dragging its corner
     S.CAM_VIEWS = { "Normal", "Front", "Hands", "Left Hand", "Right Hand" }
     function S.cycleCam(to)
         if to then S.camView = to; return end
@@ -1416,11 +1418,11 @@ task.spawn(function()
         "scale", "sens", "moveK", "slowFactor", "tpDist", "spread", "height", "handSens", "aimSens", "handRange",
         "reachL", "reachR", "handLX", "handLY", "handRX", "handRY",
         "aimLYaw", "aimLPitch", "aimRYaw", "aimRPitch",
-        "thirdPerson", "camView", "handMode", "aimMode",
+        "thirdPerson", "camView", "handMode", "aimMode", "hudZoom",
     }
     local Save = { last = nil, ok = (type(writefile) == "function" and type(readfile) == "function") }
     function Save.snapshot()
-        local d = { s = {}, xh = {}, theme = { hue = Theme.hue, size = Theme.size }, panels = S.panelSize }
+        local d = { s = {}, xh = {}, theme = { hue = Theme.hue, size = Theme.size }, panels = S.panelSize, pscale = S.panelScale }
         for _, k in ipairs(S_KEYS) do d.s[k] = S[k] end
         for k, v in pairs(XH) do
             if k ~= "dirty" then
@@ -1461,6 +1463,11 @@ task.spawn(function()
                 end
             end
             XH.dirty = true
+        end
+        if type(d.pscale) == "table" then
+            for slot, v in pairs(d.pscale) do
+                if type(slot) == "string" and type(v) == "number" and v >= 0.6 and v <= 1.5 then S.panelScale[slot] = v end
+            end
         end
         if type(d.panels) == "table" then
             for slot, v in pairs(d.panels) do
@@ -2680,6 +2687,56 @@ task.spawn(function()
 
         hudLabel = lbl
 
+        -- drag the top-right corner to make the controls text bigger / smaller (it grows from the bottom-left)
+        do
+            local rh = Instance.new("TextButton")
+            rh.Name = "Resize"
+            rh.AnchorPoint = Vector2.new(1, 0)
+            rh.Position = UDim2.new(1, -4, 0, 4)
+            rh.Size = UDim2.fromOffset(26, 26)
+            rh.AutoButtonColor = false
+            rh.BackgroundTransparency = 1
+            rh.Text = ""
+            rh.ZIndex = 5
+            rh.Parent = lbl
+            for i = 1, 2 do
+                local line = Instance.new("Frame")
+                line.AnchorPoint = Vector2.new(0.5, 0.5)
+                line.Position = UDim2.new(0.5, 3 + (i - 1) * 4, 0.5, -3 - (i - 1) * 4)
+                line.Size = UDim2.fromOffset(i == 1 and 14 or 8, 2)
+                line.Rotation = 45
+                line.BackgroundColor3 = Color3.new(1, 1, 1)
+                line.BackgroundTransparency = 0.45
+                line.BorderSizePixel = 0
+                line.ZIndex = 6
+                line.Active = false
+                line.Parent = rh
+            end
+            rh.InputBegan:Connect(function(input)
+                local t = input.UserInputType
+                if t ~= Enum.UserInputType.MouseButton1 and t ~= Enum.UserInputType.Touch then return end
+                local function at() return Vector2.new(input.Position.X, input.Position.Y) end
+                local origin = lbl.AbsolutePosition + Vector2.new(0, lbl.AbsoluteSize.Y)   -- bottom-left stays put
+                local d0 = math.max((at() - origin).Magnitude, 20)
+                local z0 = S.hudZoom
+                local conns = {}
+                local function stop()
+                    if #conns == 0 then return end
+                    for _, c in ipairs(conns) do c:Disconnect() end
+                    conns = {}
+                end
+                conns[1] = RunService.RenderStepped:Connect(function()
+                    S.hudZoom = math.clamp(z0 * (at() - origin).Magnitude / d0, 0.5, 2)
+                    local sc = lbl:FindFirstChildOfClass("UIScale")
+                    if sc then sc.Scale = Theme.size * S.hudZoom end
+                end)
+                conns[2] = UIS.InputEnded:Connect(function(io) if io == input then stop() end end)
+                conns[3] = input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End or input.UserInputState == Enum.UserInputState.Cancel then stop() end
+                end)
+            end)
+        end
+
         local stroke = Instance.new("UIStroke", lbl)
         stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
         stroke.Color = Color3.fromRGB(215, 185, 255)
@@ -2694,14 +2751,14 @@ task.spawn(function()
         -- menu size setting + little pop animation every time the menu is shown
         local TS = game:GetService("TweenService")
         local lblScale = Instance.new("UIScale")
-        lblScale.Scale = Theme.size
+        lblScale.Scale = Theme.size * S.hudZoom
         lblScale.Parent = lbl
-        Theme.listeners[#Theme.listeners + 1] = function() lblScale.Scale = Theme.size end
+        Theme.listeners[#Theme.listeners + 1] = function() lblScale.Scale = Theme.size * S.hudZoom end
         lbl:GetPropertyChangedSignal("Visible"):Connect(function()
             if lbl.Visible then
-                lblScale.Scale = Theme.size * 0.9
+                lblScale.Scale = Theme.size * S.hudZoom * 0.9
                 TS:Create(lblScale, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
-                    { Scale = Theme.size }):Play()
+                    { Scale = Theme.size * S.hudZoom }):Play()
             end
         end)
 
@@ -3738,7 +3795,7 @@ task.spawn(function()
                 task.delay(delay, function()
                     if startGui ~= g then return end
                     tw(p, 1.0, { GroupTransparency = 0, Position = UDim2.fromOffset(ent.x, ent.y) }, Enum.EasingStyle.Exponential)
-                    tw(ps, 0.9, { Scale = 1 }, Enum.EasingStyle.Quint)
+                    tw(ps, 0.9, { Scale = ent.userScale or 1 }, Enum.EasingStyle.Quint)
                 end)
 
                 -- ===== drag handle (top strip of every panel) =====
@@ -3748,6 +3805,14 @@ task.spawn(function()
                     sh.Position = UDim2.fromOffset(nx, ny + 10)
                     halo.Position = UDim2.fromOffset(nx - 4, ny - 4)
                     glow.Position = UDim2.fromOffset(nx - 6, ny - 6)
+                end
+                -- scales the whole panel (and its shadow / glow) around its top-left corner
+                ent.setScale = function(k)
+                    ent.userScale = k
+                    ps.Scale = k
+                    sh.Size = UDim2.fromOffset(w * k, h * k)
+                    halo.Size = UDim2.fromOffset(w * k + 8, h * k + 8)
+                    glow.Size = UDim2.fromOffset(w * k + 12, h * k + 12)
                 end
                 -- resizes the panel and its shadow / glow together
                 ent.resize = function(nw, nh)
@@ -3843,18 +3908,22 @@ task.spawn(function()
             end
 
             local main, mainEnt = makePanel(0, 0, MAINW, PH, "Panel", 0)
-            -- resize handle for the whole Start Menu (same setting as Settings > Menu size, saved with it)
-            do
+            local dock, dockEnt = makePanel(135, PH + 22, 560, 62, "Dock", 0.2)
+            local side, sideEnt = makePanel(MAINW + 14, 90, 246, 360, "Side", 0.12)
+            -- the Main window, the Dock and the Side panel each scale on their own: drag the corner handle (saved)
+            -- (Settings > Menu size still scales the whole Start Menu at once)
+            for _, def in ipairs({ { "main", main, mainEnt }, { "dock", dock, dockEnt }, { "side", side, sideEnt } }) do
+                local key, host, pe = def[1], def[2], def[3]
                 local rh = Instance.new("TextButton")
                 rh.Name = "Resize"
                 rh.AnchorPoint = Vector2.new(1, 1)
-                rh.Position = UDim2.new(1, -4, 1, -4)
-                rh.Size = UDim2.fromOffset(24, 24)
+                rh.Position = UDim2.new(1, -2, 1, -2)
+                rh.Size = UDim2.fromOffset(22, 22)
                 rh.AutoButtonColor = false
                 rh.BackgroundTransparency = 1
                 rh.Text = ""
                 rh.ZIndex = 12
-                rh.Parent = main
+                rh.Parent = host
                 for i = 1, 2 do
                     local line = Instance.new("Frame")
                     line.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -3870,29 +3939,28 @@ task.spawn(function()
                 end
                 rh.InputBegan:Connect(function(input)
                     if not isPress(input) then return end
-                    local center = wrap.AbsolutePosition + wrap.AbsoluteSize / 2   -- the menu scales around its centre
-                    local d0 = math.max((sp(input) - center).Magnitude, 20)
-                    local s0 = Theme.size
+                    local origin = host.AbsolutePosition   -- top-left stays put while scaling
+                    local d0 = math.max((sp(input) - origin).Magnitude, 20)
+                    local k0 = pe.userScale or 1
                     local conns = {}
                     local function stop()
                         if #conns == 0 then return end
                         for _, c in ipairs(conns) do c:Disconnect() end
                         conns = {}
-                        Theme.set(nil, Theme.size)
+                        S.panelScale[key] = pe.userScale or 1
                     end
                     conns[1] = RunService.RenderStepped:Connect(function()
-                        local d = (sp(input) - center).Magnitude
-                        Theme.size = math.clamp(s0 * d / d0, 0.6, 1.4)   -- cheap while dragging; listeners run once on release
-                        refit(true)
+                        local d = (sp(input) - origin).Magnitude
+                        pe.setScale(math.clamp(k0 * d / d0, 0.6, 1.5))
                     end)
                     conns[2] = UIS.InputEnded:Connect(function(io) if io == input then stop() end end)
                     conns[3] = input.Changed:Connect(function()
                         if input.UserInputState == Enum.UserInputState.End or input.UserInputState == Enum.UserInputState.Cancel then stop() end
                     end)
                 end)
+                local saved = S.panelScale[key]
+                if saved then pe.userScale = saved; task.delay(1.3, function() if host.Parent then pe.setScale(saved) end end) end
             end
-            local dock = makePanel(135, PH + 22, 560, 62, "Dock", 0.2)
-            local side = makePanel(MAINW + 14, 90, 246, 360, "Side", 0.12)
 
             -- ===== OVERLAY PANELS: Controls (PC + Mobile) and Settings (colour + size) =====
             local CONTROLS = {
