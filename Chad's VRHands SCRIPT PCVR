@@ -47,7 +47,7 @@ local UPDATE_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR
 --   2.0.4 -> 2.0.5 ... 2.0.12 -> 2.1.0 ... 2.1.12 -> 2.2.0 ... 2.12.12 -> 3.0.0
 -- Your Discord/status feed ("version" in status.json) should use the same pattern, and the script
 -- compares versions as NUMBERS (so 2.0.12 is newer than 2.0.4, and 2.1.0 is newer than 2.0.12).
-local SCRIPT_VERSION = "2.0.4"
+local SCRIPT_VERSION = "2.0.9"
 -- Optional: RAW link to a small JSON file YOU host. It feeds the Banwave / Key system / Script rows.
 -- Leave "" to skip. Example file:
 --   { "banwave": "clear", "banwave_note": "No wave reported",
@@ -3124,6 +3124,11 @@ task.spawn(function()
             if kind == "person" then
                 bar(0.5, 0.26, 0.34, 0.34)
                 bar(0.5, 0.72, 0.7, 0.42)
+            elseif kind == "addperson" then
+                bar(0.36, 0.27, 0.3, 0.3)
+                bar(0.36, 0.7, 0.58, 0.38)
+                bar(0.8, 0.4, 0.3, 0.09)
+                bar(0.8, 0.4, 0.09, 0.3)
             elseif kind == "hand" then
                 bar(0.5, 0.68, 0.64, 0.42)
                 bar(0.27, 0.36, 0.13, 0.4)
@@ -3197,6 +3202,11 @@ task.spawn(function()
                 bar(0.5, 0.9, 0.12, 0.2)
                 bar(0.1, 0.5, 0.2, 0.12)
                 bar(0.9, 0.5, 0.2, 0.12)
+            elseif kind == "games" then
+                bar(0.27, 0.27, 0.36, 0.36, 0, false)
+                bar(0.73, 0.27, 0.36, 0.36, 0, false)
+                bar(0.27, 0.73, 0.36, 0.36, 0, false)
+                bar(0.73, 0.73, 0.36, 0.36, 0, false)
             elseif kind == "gear" then
                 ring(0.5, 0.5, 0.56, 3.5)
                 bar(0.5, 0.08, 0.14, 0.2, 0, false)
@@ -3909,7 +3919,7 @@ task.spawn(function()
 
             local main, mainEnt = makePanel(0, 0, MAINW, PH, "Panel", 0)
             -- wide enough for the FPS box on the left, the PING box on the right and every dock icon between them
-            local DOCKW = 720
+            local DOCKW = 780
             local dock, dockEnt = makePanel((PW - DOCKW) / 2, PH + 22, DOCKW, 62, "Dock", 0.2)
             local side, sideEnt = makePanel(MAINW + 14, 90, 246, 360, "Side", 0.12)
             -- the Main window, the Dock and the Side panel each scale on their own: drag the corner handle (saved)
@@ -4030,7 +4040,7 @@ task.spawn(function()
             -- generic overlay: panel + title + close button. Calling it again
             -- while it is open closes it (toggle).
             local function overlay(slot, x, y, w, h, name, title)
-                for _, other in ipairs({ "controls", "settings", "crosshair", "teleport", "profile", "servers" }) do
+                for _, other in ipairs({ "controls", "settings", "crosshair", "teleport", "profile", "servers", "roblox" }) do
                     if other ~= slot and me[other] and not me[other].closed then
                         me[other].close(); me[other] = nil
                     end
@@ -5045,6 +5055,1005 @@ task.spawn(function()
                 Theme.recolor(p)
             end
 
+            -- ---------- ROBLOX HOME panel (browse games + friends through Roblox's web API) ----------
+            -- Looks like the Roblox home page, in this menu's colours. Rows: Friends, Continue, then the same game lists Roblox's
+            -- own home page shows (Top Trending, Up-and-Coming ...). Tap a game for details + PLAY, tap a friend to join them.
+            -- The search box finds games by name (or by place id). "Continue" can't come from the web (it needs your login
+            -- cookie), so it lists the games you started this script in.
+            local RECENT_FILE = "NoVR_Recent.json"
+            local Recent = _G.NoVR_Recent   -- kept in _G so reopening the Start Menu doesn't re-read the file
+            if type(Recent) ~= "table" then
+                Recent = {}
+                _G.NoVR_Recent = Recent
+                local okR, raw = pcall(function() return isfile and isfile(RECENT_FILE) and readfile(RECENT_FILE) or nil end)
+                if okR and type(raw) == "string" then
+                    local okJ, t = pcall(function() return game:GetService("HttpService"):JSONDecode(raw) end)
+                    if okJ and type(t) == "table" then
+                        for _, e in ipairs(t) do
+                            if type(e) == "table" and tonumber(e.u) and tonumber(e.p) and type(e.n) == "string" then
+                                Recent[#Recent + 1] = { u = tonumber(e.u), p = tonumber(e.p), n = e.n }
+                            end
+                        end
+                    end
+                end
+            end
+            if not _G.NoVR_RecentDone then
+                _G.NoVR_RecentDone = true
+                task.spawn(function()   -- remember the game this script was started in (newest first, 16 at most)
+                if game.GameId == 0 or game.PlaceId == 0 then return end
+                local name = "Game " .. game.PlaceId
+                local okN, pinfo = pcall(function() return game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId) end)
+                if okN and type(pinfo) == "table" and type(pinfo.Name) == "string" then name = pinfo.Name end
+                for i = #Recent, 1, -1 do
+                    if Recent[i].u == game.GameId then table.remove(Recent, i) end
+                end
+                table.insert(Recent, 1, { u = game.GameId, p = game.PlaceId, n = name })
+                while #Recent > 16 do table.remove(Recent) end
+                pcall(function()
+                    if writefile then writefile(RECENT_FILE, game:GetService("HttpService"):JSONEncode(Recent)) end
+                end)
+                end)
+            end
+
+            local function openRoblox()
+                local p, ent = overlay("roblox", 24, 10, 740, 440, "Roblox", "Roblox Home")
+                if not p then return end
+                local HttpService     = game:GetService("HttpService")
+                local PlayersSvc      = game:GetService("Players")
+                local TeleportService = game:GetService("TeleportService")
+                local req  = (syn and syn.request) or http_request or request or (fluxus and fluxus.request)
+                local clip = setclipboard or toclipboard
+                local Info = _G.NoVR_RbInfo   -- universeId -> what we know about it (shared by every row / pop-up, kept while the game runs)
+                if type(Info) ~= "table" then Info = {}; _G.NoVR_RbInfo = Info end
+                local session = HttpService:GenerateGUID(false)
+                local device  = IS_MOBILE and "phone" or "computer"
+                local CARD_W  = 122
+                local ROW_H   = 190
+                local mode, lastQuery = "home", ""
+                local loadToken = 0   -- bumps on every refresh / search, so an old answer can never overwrite a newer page
+                local joining = false
+
+                -- ===== web requests =====
+                -- returns the decoded JSON, or nil + the reason. Tries request() first (it reports the status code), then HttpGet.
+                local function rbGet(url)
+                    local code
+                    for attempt = 1, 2 do
+                        local body
+                        if req then
+                            local ok, r = pcall(req, { Url = url, Method = "GET", Headers = { Accept = "application/json" } })
+                            if ok and type(r) == "table" then
+                                code = r.StatusCode
+                                if r.Success or r.StatusCode == 200 then body = r.Body end
+                            end
+                        end
+                        if not body then
+                            local ok, res = pcall(function() return game:HttpGet(url, true) end)
+                            if ok and type(res) == "string" and #res > 0 then body = res end
+                        end
+                        if body then
+                            local ok, data = pcall(HttpService.JSONDecode, HttpService, body)
+                            if ok and type(data) == "table" then return data end
+                            return nil, "bad data"
+                        end
+                        if code == 429 and attempt == 1 then task.wait(1.5) else break end
+                    end
+                    return nil, code == 429 and "rate limited" or ("HTTP " .. tostring(code or "blocked"))
+                end
+
+                -- Roblox's endpoints answer in slightly different shapes, so instead of trusting one layout this walks the
+                -- reply and picks up every game-shaped entry in order (universeId + name, or contentId for search results).
+                local function collectGames(node, out, seen, depth)
+                    if type(node) ~= "table" or depth > 7 then return end
+                    local uid = tonumber(node.universeId) or (node.contentType == "Game" and tonumber(node.contentId)) or nil
+                    if uid and uid > 0 and type(node.name) == "string" then
+                        if not seen[uid] then
+                            seen[uid] = true
+                            out[#out + 1] = {
+                                u = uid, n = node.name,
+                                p = tonumber(node.rootPlaceId) or tonumber(node.placeId),
+                                live = tonumber(node.playerCount) or tonumber(node.playing),
+                                up = tonumber(node.totalUpVotes), down = tonumber(node.totalDownVotes),
+                            }
+                        end
+                        return
+                    end
+                    if #node > 0 then
+                        for i = 1, #node do collectGames(node[i], out, seen, depth + 1) end
+                    else
+                        for _, v in pairs(node) do collectGames(v, out, seen, depth + 1) end
+                    end
+                end
+
+                local function remember(g)
+                    local inf = Info[g.u] or {}
+                    for k, v in pairs({ p = g.p, live = g.live, up = g.up, down = g.down, n = g.n }) do inf[k] = v end
+                    Info[g.u] = inf
+                    return inf
+                end
+
+                local function idChunks(ids, fn)
+                    for i = 1, #ids, 40 do
+                        local chunk = {}
+                        for j = i, math.min(i + 39, #ids) do chunk[#chunk + 1] = ids[j] end
+                        fn(table.concat(chunk, ","))
+                    end
+                end
+                local function fetchDetails(ids)
+                    idChunks(ids, function(csv)
+                        local data = rbGet("https://games.roblox.com/v1/games?universeIds=" .. csv)
+                        if data and type(data.data) == "table" then
+                            for _, d in ipairs(data.data) do
+                                local u = type(d) == "table" and tonumber(d.id)
+                                if u then
+                                    local inf = Info[u] or {}
+                                    inf.p = tonumber(d.rootPlaceId) or inf.p
+                                    inf.live = tonumber(d.playing) or inf.live
+                                    inf.visits, inf.fav, inf.max = tonumber(d.visits), tonumber(d.favoritedCount), tonumber(d.maxPlayers)
+                                    if type(d.description) == "string" then inf.desc = d.description end
+                                    if type(d.creator) == "table" and type(d.creator.name) == "string" then inf.by = d.creator.name end
+                                    if type(d.name) == "string" then inf.n = d.name end
+                                    Info[u] = inf
+                                end
+                            end
+                        end
+                    end)
+                end
+                local function fetchVotes(ids)
+                    idChunks(ids, function(csv)
+                        local data = rbGet("https://games.roblox.com/v1/games/votes?universeIds=" .. csv)
+                        if data and type(data.data) == "table" then
+                            for _, v in ipairs(data.data) do
+                                local u = type(v) == "table" and tonumber(v.id)
+                                if u then
+                                    local inf = Info[u] or {}
+                                    inf.up, inf.down = tonumber(v.upVotes), tonumber(v.downVotes)
+                                    Info[u] = inf
+                                end
+                            end
+                        end
+                    end)
+                end
+                -- fills in only what a list didn't already tell us (place id, players now, votes)
+                local function enrichList(list)
+                    local needD, needV = {}, {}
+                    for _, g in ipairs(list) do
+                        local inf = remember(g)
+                        if not inf.p or inf.live == nil then needD[#needD + 1] = g.u end
+                        if inf.up == nil or inf.down == nil then needV[#needV + 1] = g.u end
+                    end
+                    if #needD > 0 then fetchDetails(needD) end
+                    if #needV > 0 then fetchVotes(needV) end
+                end
+
+                -- the game lists of Roblox's home page: explore-api first, the older games list as a fallback.
+                -- onRow(name, games) is called for each list as soon as it is ready. Returns how many lists were shown + why not.
+                local function fetchHome(onRow, stopped)
+                    local count, why = 0, nil
+                    local sorts, w1 = rbGet("https://apis.roblox.com/explore-api/v1/get-sorts?sessionId=" .. session
+                        .. "&device=" .. device .. "&country=all")
+                    why = w1
+                    if sorts and type(sorts.sorts) == "table" then
+                        for _, s in ipairs(sorts.sorts) do
+                            if count >= 6 or stopped() then break end
+                            local id = type(s) == "table" and (s.sortId or s.id)
+                            local ct = type(s) == "table" and s.contentType
+                            if type(id) == "string" and (ct == nil or ct == "Games") then
+                                local base = "https://apis.roblox.com/explore-api/v1/get-sort-content?sessionId=" .. session
+                                    .. "&sortId=" .. HttpService:UrlEncode(id)
+                                local data = rbGet(base .. "&device=" .. device .. "&country=all") or rbGet(base)
+                                local list = {}
+                                if data then collectGames(data, list, {}, 0) end
+                                while #list > 16 do list[#list] = nil end
+                                if #list > 0 then
+                                    enrichList(list)
+                                    if stopped() then break end
+                                    count += 1
+                                    onRow(tostring(s.sortDisplayName or s.displayName or id), list)
+                                end
+                                task.wait(0.1)
+                            end
+                        end
+                    end
+                    if count == 0 and not stopped() then
+                        local ls, w2 = rbGet("https://games.roblox.com/v1/games/sorts?gameSortsContext=GamesDefaultSorts")
+                        why = why or w2
+                        if ls and type(ls.sorts) == "table" then
+                            for _, s in ipairs(ls.sorts) do
+                                if count >= 6 or stopped() then break end
+                                if type(s) == "table" and type(s.token) == "string" then
+                                    local d = rbGet("https://games.roblox.com/v1/games/list?sortToken=" .. s.token .. "&startRows=0&maxRows=24")
+                                    local list = {}
+                                    if d then collectGames(d, list, {}, 0) end
+                                    while #list > 16 do list[#list] = nil end
+                                    if #list > 0 then
+                                        enrichList(list)
+                                        if stopped() then break end
+                                        count += 1
+                                        onRow(tostring(s.displayName or s.name or "Games"), list)
+                                    end
+                                    task.wait(0.1)
+                                end
+                            end
+                        end
+                    end
+                    return count, why
+                end
+
+                local function searchGames(q)
+                    local list, seen = {}, {}
+                    local why
+                    local digits = string.match(q, "^%d+$")
+                    if digits and #digits >= 5 then   -- a place id: look that game up directly
+                        local d = rbGet("https://apis.roblox.com/universes/v1/places/" .. digits .. "/universe")
+                        local u = d and tonumber(d.universeId)
+                        if u then
+                            fetchDetails({ u })
+                            local inf = Info[u]
+                            if inf and inf.n then list[1] = { u = u, n = inf.n, p = inf.p }; seen[u] = true end
+                        end
+                    end
+                    local enc = HttpService:UrlEncode(q)
+                    local data, w1 = rbGet("https://apis.roblox.com/search-api/omni-search?searchQuery=" .. enc
+                        .. "&sessionId=" .. session .. "&pageType=all")
+                    why = w1
+                    if data then collectGames(data, list, seen, 0) end
+                    if #list == 0 then
+                        local d2, w2 = rbGet("https://games.roblox.com/v1/games/list?keyword=" .. enc .. "&startRows=0&maxRows=32")
+                        why = why or w2
+                        if d2 then collectGames(d2, list, seen, 0) end
+                    end
+                    while #list > 40 do list[#list] = nil end
+                    if #list > 0 then enrichList(list) end
+                    return list, why
+                end
+
+                -- your friends: the full list (names) merged with who is online / in which game right now
+                local function loadFriendData()
+                    local online = {}
+                    pcall(function()
+                        for _, f in ipairs(lp:GetFriendsOnline(200) or {}) do
+                            local id = type(f) == "table" and tonumber(f.VisitorId)
+                            if id then online[id] = f end
+                        end
+                    end)
+                    local all = {}
+                    local okA = pcall(function()
+                        local pages = PlayersSvc:GetFriendsAsync(lp.UserId)
+                        for _ = 1, 3 do
+                            for _, f in ipairs(pages:GetCurrentPage()) do all[#all + 1] = f end
+                            if pages.IsFinished then break end
+                            pages:AdvanceToNextPageAsync()
+                        end
+                    end)
+                    local list, seen = {}, {}
+                    local function add(id, name, display, f)
+                        if not id or seen[id] then return end
+                        seen[id] = true
+                        local o = online[id]
+                        local gid = o and o.GameId and tostring(o.GameId) ~= "" and tostring(o.GameId) or nil
+                        list[#list + 1] = {
+                            id = id, name = name, display = (type(display) == "string" and display ~= "") and display or name,
+                            online = (o ~= nil) or (type(f) == "table" and f.IsOnline == true),
+                            placeId = o and tonumber(o.PlaceId) or nil, gameId = gid,
+                            loc = o and type(o.LastLocation) == "string" and o.LastLocation or nil,
+                        }
+                    end
+                    for _, f in ipairs(all) do add(tonumber(f.Id), tostring(f.Username or "?"), f.DisplayName, f) end
+                    for id, o in pairs(online) do add(id, tostring(o.UserName or "?"), o.DisplayName, o) end
+                    local function rank(f) if f.gameId and f.placeId then return 0 elseif f.online then return 1 end return 2 end
+                    table.sort(list, function(a, b)
+                        local ra, rb = rank(a), rank(b)
+                        if ra ~= rb then return ra < rb end
+                        return string.lower(a.display) < string.lower(b.display)
+                    end)
+                    local total = #list
+                    local cnt = rbGet("https://friends.roblox.com/v1/users/" .. lp.UserId .. "/friends/count")
+                    if cnt and tonumber(cnt.count) then total = tonumber(cnt.count) end
+                    while #list > 40 do list[#list] = nil end
+                    local err
+                    if #list == 0 then err = okA and "No friends to show." or "Couldn't read your friends list on this executor." end
+                    return { list = list, total = total, err = err }
+                end
+
+                -- ===== little formatting helpers =====
+                local function short(n)
+                    n = tonumber(n)
+                    if not n then return "-" end
+                    local s
+                    if n >= 1e9 then s = string.format("%.1fB", n / 1e9)
+                    elseif n >= 1e6 then s = string.format("%.1fM", n / 1e6)
+                    elseif n >= 1e3 then s = string.format("%.1fK", n / 1e3)
+                    else s = tostring(math.floor(n)) end
+                    return (string.gsub(s, "%.0([KMB])$", "%1"))
+                end
+                local function ratingOf(inf)
+                    if inf and inf.up and inf.down and inf.up + inf.down > 0 then
+                        return math.floor(inf.up / (inf.up + inf.down) * 100 + 0.5)
+                    end
+                end
+
+                -- ===== page building blocks =====
+                local function mkBtn(text, x, y, w, h, size)
+                    local b = Instance.new("TextButton")
+                    b.Position = UDim2.fromOffset(x, y)
+                    b.Size = UDim2.fromOffset(w, h)
+                    b.AutoButtonColor = false
+                    b.BackgroundColor3 = PINK
+                    b.BackgroundTransparency = 0.8
+                    b.BorderSizePixel = 0
+                    b.Text = text
+                    b.Font = Enum.Font.GothamBold
+                    b.TextSize = size or 12
+                    b.TextColor3 = WHITE
+                    b.ZIndex = 5
+                    b.Parent = p
+                    corner(b, 9)
+                    b.InputBegan:Connect(function(io) if isPress(io) then ripple(b, io, fit.Scale) end end)
+                    return b
+                end
+
+                local rf = mkBtn("REFRESH", 0, 14, 70, 28, 11)
+                rf.Position = UDim2.new(1, -120, 0, 14)
+                rf.BackgroundTransparency = 0.35
+                rf.ZIndex = 9
+                local box = Instance.new("TextBox")
+                box.Position = UDim2.fromOffset(20, 52)
+                box.Size = UDim2.fromOffset(600, 30)
+                box.BackgroundColor3 = PINK
+                box.BackgroundTransparency = 0.85
+                box.BorderSizePixel = 0
+                box.Text = ""
+                box.PlaceholderText = "Search games by name or place id, then press Enter..."
+                box.PlaceholderColor3 = MUTED
+                box.ClearTextOnFocus = false
+                box.Font = Enum.Font.GothamMedium
+                box.TextSize = 12
+                box.TextColor3 = WHITE
+                box.TextXAlignment = Enum.TextXAlignment.Left
+                box.ZIndex = 5
+                box.Parent = p
+                corner(box, 9)
+                local bpad = Instance.new("UIPadding"); bpad.PaddingLeft = UDim.new(0, 12); bpad.Parent = box
+                local homeB = mkBtn("HOME", 650, 52, 70, 30, 11)
+                local status = lbl(p, "", 20, 88, 700, 14, 11, MUTED, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+
+                local page = Instance.new("ScrollingFrame")
+                page.Position = UDim2.fromOffset(12, 108)
+                page.Size = UDim2.fromOffset(716, 320)
+                page.BackgroundTransparency = 1
+                page.BorderSizePixel = 0
+                page.ScrollBarThickness = 4
+                page.CanvasSize = UDim2.new()
+                page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+                page.ScrollingDirection = Enum.ScrollingDirection.Y
+                page.ZIndex = 2
+                page.Parent = p
+                local pageLL = Instance.new("UIListLayout")
+                pageLL.Padding = UDim.new(0, 12)
+                pageLL.SortOrder = Enum.SortOrder.LayoutOrder
+                pageLL.Parent = page
+
+                local function relayout(nw, nh)
+                    local inner = nw - 40
+                    box.Size = UDim2.fromOffset(inner - 78, 30)
+                    homeB.Position = UDim2.fromOffset(20 + inner - 70, 52)
+                    status.Size = UDim2.fromOffset(inner, 14)
+                    page.Size = UDim2.fromOffset(nw - 24, math.max(nh - 108 - 12, 60))
+                end
+                ent.onResize = relayout
+
+                local cardLabels = {}   -- stat labels of every card on the page, refreshed when more details arrive
+                local function statsOf(inf)
+                    local r = ratingOf(inf)
+                    local line1 = r and ('<font color="#8dffbd">' .. r .. '%</font> Rating') or '<font color="#c4b8f0">No rating yet</font>'
+                    local line2 = (inf and inf.live) and ('<font color="#c4b8f0">' .. short(inf.live) .. '</font> playing') or ""
+                    return line1, line2
+                end
+                local function refreshStats()
+                    for _, c in ipairs(cardLabels) do
+                        if c.st.Parent then
+                            c.st.Text, c.st2.Text = statsOf(Info[c.u])
+                        end
+                    end
+                end
+
+                local detail, popMsg
+                local function closeDetail()
+                    if detail then detail:Destroy() end
+                    detail, popMsg = nil, nil
+                end
+                local function clearPage()
+                    closeDetail()
+                    for _, c in ipairs(page:GetChildren()) do
+                        if c:IsA("GuiObject") then c:Destroy() end
+                    end
+                    page.CanvasPosition = Vector2.zero
+                    cardLabels = {}
+                end
+
+                -- picture with a coloured placeholder behind it (shows until / unless the thumbnail loads)
+                local function artBox(parent, x, y, w, h, url, name, radius)
+                    local f = Instance.new("Frame")
+                    f.Position = UDim2.fromOffset(x, y)
+                    f.Size = UDim2.fromOffset(w, h)
+                    f.BackgroundColor3 = Color3.new(1, 1, 1)
+                    f.BorderSizePixel = 0
+                    f.Active = false
+                    f.Parent = parent
+                    corner(f, radius)
+                    grad(f, C(130, 78, 235), C(42, 22, 104), 45)
+                    local first = "?"
+                    pcall(function()   -- first letter (a whole character, so names starting with an emoji / accent stay valid)
+                        local nmS = tostring(name or "?")
+                        local nxt = utf8.offset(nmS, 2)
+                        first = string.upper(string.sub(nmS, 1, (nxt or (#nmS + 1)) - 1))
+                    end)
+                    local t = lbl(f, first, 0, 0, w, h, math.floor(h * 0.42), WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+                    t.TextTransparency = 0.45
+                    local img = Instance.new("ImageLabel")
+                    img.Size = UDim2.fromScale(1, 1)
+                    img.BackgroundTransparency = 1
+                    img.BorderSizePixel = 0
+                    img.ScaleType = Enum.ScaleType.Crop
+                    img.Image = url
+                    img.Active = false
+                    img.Parent = f
+                    corner(img, radius)
+                    return f
+                end
+                local function hoverRing(btn, target)
+                    local ring = stroke(target, WHITE, 2, 1)
+                    btn.MouseEnter:Connect(function() tw(ring, 0.2, { Transparency = 0.15 }, Enum.EasingStyle.Sine) end)
+                    btn.MouseLeave:Connect(function() tw(ring, 0.25, { Transparency = 1 }, Enum.EasingStyle.Sine) end)
+                end
+
+                -- one titled row (Friends / Continue / Top Trending ...) with < > buttons to slide it
+                local function newSection(order, title, rowH)
+                    local sec = Instance.new("Frame")
+                    sec.LayoutOrder = order
+                    sec.Size = UDim2.new(1, -8, 0, rowH + 32)
+                    sec.BackgroundTransparency = 1
+                    sec.Parent = page
+                    local head = lbl(sec, title, 6, 0, 420, 24, 15, WHITE, Enum.Font.GothamBlack)
+                    local row = Instance.new("ScrollingFrame")
+                    row.Position = UDim2.fromOffset(0, 32)
+                    row.Size = UDim2.new(1, 0, 0, rowH)
+                    row.BackgroundTransparency = 1
+                    row.BorderSizePixel = 0
+                    row.ScrollBarThickness = 0
+                    row.CanvasSize = UDim2.new()
+                    row.AutomaticCanvasSize = Enum.AutomaticSize.X
+                    row.ScrollingDirection = Enum.ScrollingDirection.X
+                    row.Parent = sec
+                    local ll = Instance.new("UIListLayout")
+                    ll.FillDirection = Enum.FillDirection.Horizontal
+                    ll.Padding = UDim.new(0, 10)
+                    ll.SortOrder = Enum.SortOrder.LayoutOrder
+                    ll.Parent = row
+                    local rpad = Instance.new("UIPadding"); rpad.PaddingLeft = UDim.new(0, 6); rpad.Parent = row
+                    for i, dir in ipairs({ -1, 1 }) do
+                        local a = Instance.new("TextButton")
+                        a.AnchorPoint = Vector2.new(1, 0)
+                        a.Position = UDim2.new(1, -4 - (2 - i) * 30, 0, 1)
+                        a.Size = UDim2.fromOffset(26, 22)
+                        a.AutoButtonColor = false
+                        a.BackgroundColor3 = PINK
+                        a.BackgroundTransparency = 0.8
+                        a.BorderSizePixel = 0
+                        a.Text = dir < 0 and "<" or ">"
+                        a.Font = Enum.Font.GothamBlack
+                        a.TextSize = 13
+                        a.TextColor3 = WHITE
+                        a.ZIndex = 4
+                        a.Parent = sec
+                        corner(a, 7)
+                        a.Activated:Connect(function()
+                            local maxX = math.max(row.AbsoluteCanvasSize.X - row.AbsoluteSize.X, 0)
+                            local to = math.clamp(row.CanvasPosition.X + dir * row.AbsoluteSize.X * 0.8, 0, maxX)
+                            tw(row, 0.35, { CanvasPosition = Vector2.new(to, 0) })
+                        end)
+                    end
+                    local note = lbl(sec, "Loading...", 6, 40, 560, 20, 12, MUTED, Enum.Font.GothamMedium)
+                    return { frame = sec, row = row, head = head, note = note }
+                end
+
+                -- ===== pop-ups (game details / friend) =====
+                local function popup()
+                    closeDetail()
+                    local d = Instance.new("Frame")
+                    d.Name = "Detail"
+                    d.Position = UDim2.fromOffset(12, 50)
+                    d.Size = UDim2.new(1, -24, 1, -62)
+                    d.BackgroundColor3 = C(26, 12, 70)
+                    d.BackgroundTransparency = 0.03
+                    d.BorderSizePixel = 0
+                    d.ZIndex = 10
+                    d.Active = true
+                    d.Parent = p
+                    corner(d, 12)
+                    stroke(d, WHITE, 1.5, 0.6)
+                    detail = d
+                    popMsg = lbl(d, "", 16, 0, 400, 14, 11, MUTED, Enum.Font.GothamBold)
+                    popMsg.AnchorPoint = Vector2.new(0, 1)
+                    popMsg.Position = UDim2.new(0, 16, 1, -54)
+                    popMsg.Size = UDim2.new(1, -32, 0, 14)
+                    return d
+                end
+                local function popButton(d, text, x, w, strong, action)
+                    local b = Instance.new("TextButton")
+                    b.AnchorPoint = Vector2.new(0, 1)
+                    b.Position = UDim2.new(0, x, 1, -14)
+                    b.Size = UDim2.fromOffset(w, 34)
+                    b.AutoButtonColor = false
+                    b.BackgroundColor3 = PINK
+                    b.BackgroundTransparency = strong and 0.1 or 0.75
+                    b.BorderSizePixel = 0
+                    b.Text = text
+                    b.Font = Enum.Font.GothamBold
+                    b.TextSize = 12
+                    b.TextColor3 = WHITE
+                    b.Parent = d
+                    corner(b, 9)
+                    b.InputBegan:Connect(function(io) if isPress(io) then ripple(b, io, fit.Scale) end end)
+                    b.Activated:Connect(action)
+                    return b
+                end
+                local function closeButton(d)
+                    local b = popButton(d, "CLOSE", 0, 96, false, closeDetail)
+                    b.AnchorPoint = Vector2.new(1, 1)
+                    b.Position = UDim2.new(1, -16, 1, -14)
+                end
+                local function copyButton(d, text, x, w, value)
+                    local b
+                    b = popButton(d, text, x, w, false, function()
+                        if clip then
+                            pcall(clip, value)
+                            b.Text = "COPIED!"
+                        else
+                            b.Text = "NO CLIPBOARD"
+                        end
+                        task.delay(1.2, function() if b.Parent then b.Text = text end end)
+                    end)
+                end
+
+                local function play(placeId, jobId, label, sameGame)
+                    if joining then return end
+                    if not placeId then
+                        if popMsg then popMsg.Text = "No place id for this game." end
+                        return
+                    end
+                    joining = true
+                    if popMsg then popMsg.Text = "Joining " .. label .. "..." end
+                    if sameGame then
+                        local payload = queuePayload()
+                        if EXEC.queue and payload then pcall(EXEC.queue, payload)
+                        elseif popMsg then popMsg.Text = "Joining " .. label .. " (this executor can't carry the script across)..." end
+                    end
+                    local ok, err = pcall(function()
+                        if jobId then TeleportService:TeleportToPlaceInstance(placeId, jobId, lp)
+                        else TeleportService:Teleport(placeId, lp) end
+                    end)
+                    if not ok then
+                        joining = false
+                        if popMsg then popMsg.Text = "Join failed: " .. string.sub(tostring(err), 1, 60) end
+                    end
+                    task.delay(20, function() joining = false end)
+                end
+                local failConn
+                failConn = TeleportService.TeleportInitFailed:Connect(function(_, result, msg)
+                    if ent.closed then failConn:Disconnect() return end
+                    joining = false
+                    if popMsg then popMsg.Text = "Join failed: " .. string.sub(tostring(msg ~= "" and msg or result), 1, 60) end
+                end)
+
+                local function showGame(g)
+                    local d = popup()
+                    remember(g)
+                    artBox(d, 16, 16, 150, 150, "rbxthumb://type=GameIcon&id=" .. g.u .. "&w=256&h=256", g.n, 14)
+                    local title = lbl(d, g.n, 182, 14, 300, 46, 18, WHITE, Enum.Font.GothamBlack)
+                    title.Size = UDim2.new(1, -200, 0, 46)
+                    title.TextWrapped = true
+                    title.TextYAlignment = Enum.TextYAlignment.Top
+                    local by = lbl(d, "", 182, 62, 300, 16, 12, MUTED, Enum.Font.GothamMedium)
+                    by.Size = UDim2.new(1, -200, 0, 16)
+                    local facts = lbl(d, "", 182, 86, 300, 82, 12, WHITE, Enum.Font.GothamMedium)
+                    facts.Size = UDim2.new(1, -200, 0, 82)
+                    facts.RichText = true
+                    facts.TextWrapped = true
+                    facts.TextYAlignment = Enum.TextYAlignment.Top
+                    facts.TextTruncate = Enum.TextTruncate.None
+                    local ds = Instance.new("ScrollingFrame")
+                    ds.Position = UDim2.fromOffset(16, 178)
+                    ds.Size = UDim2.new(1, -32, 1, -250)
+                    ds.BackgroundTransparency = 1
+                    ds.BorderSizePixel = 0
+                    ds.ScrollBarThickness = 4
+                    ds.CanvasSize = UDim2.new()
+                    ds.AutomaticCanvasSize = Enum.AutomaticSize.Y
+                    ds.ScrollingDirection = Enum.ScrollingDirection.Y
+                    ds.Parent = d
+                    local desc = lbl(ds, "", 0, 0, 300, 20, 12, MUTED, Enum.Font.GothamMedium)
+                    desc.Size = UDim2.new(1, -8, 0, 0)
+                    desc.AutomaticSize = Enum.AutomaticSize.Y
+                    desc.TextWrapped = true
+                    desc.TextYAlignment = Enum.TextYAlignment.Top
+                    desc.TextTruncate = Enum.TextTruncate.None
+
+                    local function paint()
+                        local inf = Info[g.u] or {}
+                        local r = ratingOf(inf)
+                        by.Text = inf.by and ("By " .. inf.by) or ""
+                        facts.Text = table.concat({
+                            "<b>Playing</b>   " .. (inf.live and short(inf.live) or "-"),
+                            "<b>Rating</b>   " .. (r and (r .. "%") or "-"),
+                            "<b>Visits</b>   " .. short(inf.visits),
+                            "<b>Favorites</b>   " .. short(inf.fav),
+                            "<b>Max players</b>   " .. (inf.max and tostring(math.floor(inf.max)) or "-"),
+                        }, "\n")
+                        desc.Text = (inf.desc and inf.desc ~= "") and inf.desc or "Loading description..."
+                    end
+                    paint()
+                    local same = (g.u == game.GameId)
+                    popButton(d, "PLAY", 16, 130, true, function()
+                        local inf = Info[g.u] or {}
+                        play(g.p or inf.p, nil, g.n, same)
+                    end)
+                    copyButton(d, "COPY LINK", 154, 130, "https://www.roblox.com/games/" .. tostring(g.p or (Info[g.u] and Info[g.u].p) or ""))
+                    closeButton(d)
+                    if not same and popMsg then popMsg.Text = "The script only reloads by itself in the game you started it in." end
+                    Theme.recolor(d)
+                    task.spawn(function()
+                        fetchDetails({ g.u })
+                        fetchVotes({ g.u })
+                        if detail == d then
+                            local inf = Info[g.u] or {}
+                            if inf.desc == nil then inf.desc = "" end
+                            paint()
+                            if inf.desc == "" then desc.Text = "No description." end
+                            refreshStats()
+                        end
+                    end)
+                end
+
+                local function showFriend(f)
+                    local d = popup()
+                    artBox(d, 16, 16, 110, 110, "rbxthumb://type=AvatarHeadShot&id=" .. f.id .. "&w=150&h=150", f.display, 55)
+                    local nm = lbl(d, f.display, 142, 22, 300, 26, 20, WHITE, Enum.Font.GothamBlack)
+                    nm.Size = UDim2.new(1, -160, 0, 26)
+                    local un = lbl(d, "@" .. f.name, 142, 52, 300, 18, 13, MUTED, Enum.Font.GothamMedium)
+                    un.Size = UDim2.new(1, -160, 0, 18)
+                    local joinable = f.gameId ~= nil and f.placeId ~= nil
+                    local stText = joinable and ("In game: " .. (f.loc or "another game")) or (f.online and "Online" or "Offline")
+                    local st = lbl(d, stText, 142, 78, 300, 18, 13, joinable and GREEN or MUTED, Enum.Font.GothamBold)
+                    st.Size = UDim2.new(1, -160, 0, 18)
+                    if joinable then
+                        local same = (f.placeId == game.PlaceId)
+                        popButton(d, "JOIN", 16, 130, true, function() play(f.placeId, f.gameId, f.display, same) end)
+                        if not same and popMsg then popMsg.Text = "The script only reloads by itself in the game you started it in." end
+                    end
+                    copyButton(d, "COPY PROFILE LINK", joinable and 154 or 16, 170, "https://www.roblox.com/users/" .. f.id .. "/profile")
+                    closeButton(d)
+                    Theme.recolor(d)
+                end
+
+                -- ===== Add Friends: Roblox only lets a script open its own "send friend request" prompt for a player who is in
+                -- your server, so this lists them (and takes a typed username). Someone who isn't here gets a profile link instead.
+                local function showAddFriend()
+                    local d = popup()
+                    local function say(t) if detail == d and popMsg then popMsg.Text = t end end
+                    lbl(d, "Add friends", 16, 12, 300, 24, 17, WHITE, Enum.Font.GothamBlack)
+                    local ubox = Instance.new("TextBox")
+                    ubox.Position = UDim2.fromOffset(16, 44)
+                    ubox.Size = UDim2.new(1, -156, 0, 32)
+                    ubox.BackgroundColor3 = PINK
+                    ubox.BackgroundTransparency = 0.85
+                    ubox.BorderSizePixel = 0
+                    ubox.Text = ""
+                    ubox.PlaceholderText = "Type a username..."
+                    ubox.PlaceholderColor3 = MUTED
+                    ubox.ClearTextOnFocus = false
+                    ubox.Font = Enum.Font.GothamMedium
+                    ubox.TextSize = 12
+                    ubox.TextColor3 = WHITE
+                    ubox.TextXAlignment = Enum.TextXAlignment.Left
+                    ubox.Parent = d
+                    corner(ubox, 9)
+                    local upad = Instance.new("UIPadding"); upad.PaddingLeft = UDim.new(0, 12); upad.Parent = ubox
+
+                    local function prompt(pl)
+                        local ok, err = pcall(function() game:GetService("StarterGui"):SetCore("PromptSendFriendRequest", pl) end)
+                        say(ok and ("Friend request window opened for " .. pl.DisplayName .. " - confirm it there.")
+                            or ("Couldn't open the request window: " .. string.sub(tostring(err), 1, 50)))
+                    end
+                    local function inServer(name)
+                        local q = string.lower(name)
+                        local prefix
+                        for _, pl in ipairs(PlayersSvc:GetPlayers()) do
+                            if pl ~= lp then
+                                local n1, n2 = string.lower(pl.Name), string.lower(pl.DisplayName)
+                                if n1 == q or n2 == q then return pl end
+                                if not prefix and (string.sub(n1, 1, #q) == q or string.sub(n2, 1, #q) == q) then prefix = pl end
+                            end
+                        end
+                        return prefix
+                    end
+                    local function sendTyped()
+                        local q = string.match(ubox.Text or "", "^%s*@?(.-)%s*$") or ""
+                        if q == "" then say("Type a username first."); return end
+                        local pl = inServer(q)
+                        if pl then prompt(pl); return end
+                        say("Looking up " .. q .. "...")
+                        task.spawn(function()
+                            local ok, id = pcall(function() return PlayersSvc:GetUserIdFromNameAsync(q) end)
+                            if ok and tonumber(id) then
+                                if clip then pcall(clip, "https://www.roblox.com/users/" .. tonumber(id) .. "/profile") end
+                                say(q .. " isn't in this server, so a request can't be sent from here." .. (clip and " Their profile link was copied." or ""))
+                            else
+                                say('No Roblox user named "' .. q .. '".')
+                            end
+                        end)
+                    end
+                    local send = popButton(d, "SEND REQUEST", 0, 124, true, sendTyped)
+                    send.AnchorPoint = Vector2.new(1, 0)
+                    send.Position = UDim2.new(1, -16, 0, 44)
+                    send.Size = UDim2.fromOffset(124, 32)
+                    ubox.FocusLost:Connect(function(enter) if enter then sendTyped() end end)
+
+                    lbl(d, "Players in this server (ADD opens Roblox's request window)", 16, 84, 500, 16, 11, MUTED, Enum.Font.GothamBold)
+                    local list = Instance.new("ScrollingFrame")
+                    list.Position = UDim2.fromOffset(16, 106)
+                    list.Size = UDim2.new(1, -32, 1, -168)
+                    list.BackgroundTransparency = 1
+                    list.BorderSizePixel = 0
+                    list.ScrollBarThickness = 4
+                    list.CanvasSize = UDim2.new()
+                    list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+                    list.ScrollingDirection = Enum.ScrollingDirection.Y
+                    list.Parent = d
+                    local ll = Instance.new("UIListLayout")
+                    ll.Padding = UDim.new(0, 6)
+                    ll.SortOrder = Enum.SortOrder.LayoutOrder
+                    ll.Parent = list
+                    local listNote = lbl(d, "Checking who is here...", 16, 110, 500, 18, 12, MUTED, Enum.Font.GothamMedium)
+
+                    task.spawn(function()
+                        local shown = 0
+                        for _, pl in ipairs(PlayersSvc:GetPlayers()) do
+                            if detail ~= d then return end
+                            if pl ~= lp and shown < 40 then
+                                local okF, isF = pcall(function() return lp:IsFriendsWith(pl.UserId) end)
+                                if not (okF and isF) then
+                                    shown += 1
+                                    local row = Instance.new("Frame")
+                                    row.LayoutOrder = shown
+                                    row.Size = UDim2.new(1, -8, 0, 44)
+                                    row.BackgroundColor3 = PINK
+                                    row.BackgroundTransparency = 0.82
+                                    row.BorderSizePixel = 0
+                                    row.Parent = list
+                                    corner(row, 10)
+                                    artBox(row, 6, 6, 32, 32, "rbxthumb://type=AvatarHeadShot&id=" .. pl.UserId .. "&w=150&h=150", pl.DisplayName, 16)
+                                    lbl(row, pl.DisplayName, 46, 5, 260, 18, 12, WHITE, Enum.Font.GothamBold)
+                                    lbl(row, "@" .. pl.Name, 46, 23, 260, 14, 10, MUTED, Enum.Font.GothamMedium)
+                                    local add = Instance.new("TextButton")
+                                    add.AnchorPoint = Vector2.new(1, 0.5)
+                                    add.Position = UDim2.new(1, -8, 0.5, 0)
+                                    add.Size = UDim2.fromOffset(70, 28)
+                                    add.AutoButtonColor = false
+                                    add.BackgroundColor3 = PINK
+                                    add.BackgroundTransparency = 0.1
+                                    add.BorderSizePixel = 0
+                                    add.Text = "ADD"
+                                    add.Font = Enum.Font.GothamBold
+                                    add.TextSize = 12
+                                    add.TextColor3 = WHITE
+                                    add.Parent = row
+                                    corner(add, 8)
+                                    add.InputBegan:Connect(function(io) if isPress(io) then ripple(add, io, fit.Scale) end end)
+                                    add.Activated:Connect(function() prompt(pl) end)
+                                    listNote.Visible = false
+                                end
+                            end
+                        end
+                        if detail ~= d then return end
+                        if shown == 0 then listNote.Text = "Nobody to add here (you're alone, or everyone is already your friend)." end
+                        Theme.recolor(d)
+                    end)
+                    closeButton(d)
+                    Theme.recolor(d)
+                end
+
+                -- ===== cards =====
+                local function gameCard(parent, g, order)
+                    local inf = remember(g)
+                    local card = Instance.new("TextButton")
+                    card.LayoutOrder = order
+                    card.Size = UDim2.fromOffset(CARD_W, ROW_H)
+                    card.AutoButtonColor = false
+                    card.BackgroundTransparency = 1
+                    card.Text = ""
+                    card.Parent = parent
+                    local art = artBox(card, 0, 0, CARD_W, CARD_W, "rbxthumb://type=GameIcon&id=" .. g.u .. "&w=150&h=150", g.n, 12)
+                    hoverRing(card, art)
+                    local nm = lbl(card, g.n, 2, CARD_W + 6, CARD_W - 4, 30, 12, WHITE, Enum.Font.GothamBold)
+                    nm.TextWrapped = true
+                    nm.TextYAlignment = Enum.TextYAlignment.Top
+                    local st = lbl(card, "", 2, CARD_W + 38, CARD_W - 4, 14, 10, MUTED, Enum.Font.GothamMedium)
+                    st.RichText = true
+                    local st2 = lbl(card, "", 2, CARD_W + 52, CARD_W - 4, 14, 10, MUTED, Enum.Font.GothamMedium)
+                    st2.RichText = true
+                    st.Text, st2.Text = statsOf(inf)
+                    cardLabels[#cardLabels + 1] = { u = g.u, st = st, st2 = st2 }
+                    card.Activated:Connect(function() showGame(g) end)
+                    return card
+                end
+                local function friendBubble(parent, f, order)
+                    local b = Instance.new("TextButton")
+                    b.LayoutOrder = order
+                    b.Size = UDim2.fromOffset(78, 104)
+                    b.AutoButtonColor = false
+                    b.BackgroundTransparency = 1
+                    b.Text = ""
+                    b.Parent = parent
+                    local art = artBox(b, 11, 0, 56, 56, "rbxthumb://type=AvatarHeadShot&id=" .. f.id .. "&w=150&h=150", f.display, 28)
+                    hoverRing(b, art)
+                    local joinable = f.gameId ~= nil and f.placeId ~= nil
+                    if f.online then
+                        local dot = Instance.new("Frame")
+                        dot.Position = UDim2.fromOffset(11 + 42, 42)
+                        dot.Size = UDim2.fromOffset(14, 14)
+                        dot.BackgroundColor3 = joinable and C(70, 225, 120) or C(100, 170, 255)
+                        dot.BorderSizePixel = 0
+                        dot.Active = false
+                        dot.ZIndex = 4
+                        dot:SetAttribute("tc", true)   -- status colour, not themed
+                        dot.Parent = b
+                        corner(dot, 7)
+                        stroke(dot, C(26, 12, 70), 2, 0)
+                    end
+                    local nm = lbl(b, f.display, 0, 60, 78, 14, 11, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+                    local sub = joinable and (f.loc or "In game") or (f.online and "Online" or "")
+                    lbl(b, sub, 0, 74, 78, 12, 9, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+                    b.Activated:Connect(function() showFriend(f) end)
+                    return b
+                end
+
+                local function addBubble(parent)
+                    local b = Instance.new("TextButton")
+                    b.LayoutOrder = 0
+                    b.Size = UDim2.fromOffset(78, 104)
+                    b.AutoButtonColor = false
+                    b.BackgroundTransparency = 1
+                    b.Text = ""
+                    b.Parent = parent
+                    local circle = Instance.new("Frame")
+                    circle.Position = UDim2.fromOffset(11, 0)
+                    circle.Size = UDim2.fromOffset(56, 56)
+                    circle.BackgroundColor3 = PINK
+                    circle.BackgroundTransparency = 0.72
+                    circle.BorderSizePixel = 0
+                    circle.Active = false
+                    circle.Parent = b
+                    corner(circle, 28)
+                    stroke(circle, WHITE, 1.5, 0.45)
+                    drawIcon(circle, "addperson")
+                    hoverRing(b, circle)
+                    lbl(b, "Add Friends", 0, 60, 78, 14, 11, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+                    b.Activated:Connect(showAddFriend)
+                    return b
+                end
+
+                local function fillGames(sec, list)
+                    if #list == 0 then sec.note.Text = "Nothing to show here."; return end
+                    sec.note.Visible = false
+                    for i, g in ipairs(list) do gameCard(sec.row, g, i) end
+                    Theme.recolor(sec.frame)
+                end
+                local function fillFriends(sec, data)
+                    sec.head.Text = "Friends" .. (data.total and (" (" .. data.total .. ")") or "")
+                    if #data.list == 0 then sec.note.Text = data.err or "No friends to show."; return end
+                    sec.note.Visible = false
+                    for i, f in ipairs(data.list) do friendBubble(sec.row, f, i) end
+                    Theme.recolor(sec.frame)
+                end
+
+                -- ===== the two pages: Home and Search =====
+                local function showHome(force)
+                    loadToken += 1
+                    local my = loadToken
+                    local function stale() return my ~= loadToken or ent.closed end
+                    mode = "home"
+                    clearPage()
+                    status.Text = ""
+                    local fSec = newSection(1, "Friends", 104)
+                    addBubble(fSec.row)
+                    fSec.note.Position = UDim2.fromOffset(100, 40)
+                    local cSec = newSection(2, "Continue", ROW_H)
+                    local recentGames = {}
+                    for _, e in ipairs(Recent) do recentGames[#recentGames + 1] = { u = e.u, p = e.p, n = e.n } end
+                    if #recentGames == 0 then cSec.note.Text = "Games you start this script in show up here."
+                    else fillGames(cSec, recentGames) end
+
+                    local cache = _G.NoVR_RbCache
+                    if cache and not force and os.time() - cache.at < 180 then
+                        fillFriends(fSec, cache.friends)
+                        for i, row in ipairs(cache.rows) do fillGames(newSection(10 + i, row.name, ROW_H), row.games) end
+                        refreshStats()
+                        return
+                    end
+                    status.Text = "Loading Roblox..."
+                    task.spawn(function()
+                        local fd = loadFriendData()
+                        if stale() then return end
+                        fillFriends(fSec, fd)
+                        if #recentGames > 0 then
+                            enrichList(recentGames)
+                            if stale() then return end
+                            refreshStats()
+                        end
+                        local rows = {}
+                        local count, why = fetchHome(function(name, list)
+                            rows[#rows + 1] = { name = name, games = list }
+                            fillGames(newSection(10 + #rows, name, ROW_H), list)
+                        end, stale)
+                        if stale() then return end
+                        if count == 0 then
+                            status.Text = "Couldn't load Roblox's game lists (" .. tostring(why or "no data") .. "). Press REFRESH to retry."
+                        else
+                            status.Text = ""
+                        end
+                        _G.NoVR_RbCache = { at = os.time(), friends = fd, rows = rows }
+                    end)
+                end
+
+                local function showSearch(q)
+                    loadToken += 1
+                    local my = loadToken
+                    mode, lastQuery = "search", q
+                    clearPage()
+                    status.Text = 'Searching "' .. q .. '"...'
+                    local grid = Instance.new("Frame")
+                    grid.LayoutOrder = 1
+                    grid.Size = UDim2.new(1, -8, 0, 0)
+                    grid.AutomaticSize = Enum.AutomaticSize.Y
+                    grid.BackgroundTransparency = 1
+                    grid.Parent = page
+                    local gl = Instance.new("UIGridLayout")
+                    gl.CellSize = UDim2.fromOffset(CARD_W, ROW_H)
+                    gl.CellPadding = UDim2.fromOffset(10, 10)
+                    gl.SortOrder = Enum.SortOrder.LayoutOrder
+                    gl.Parent = grid
+                    task.spawn(function()
+                        local list, why = searchGames(q)
+                        if my ~= loadToken or ent.closed then return end
+                        if #list == 0 then
+                            status.Text = (why and why ~= "") and ('No results (' .. tostring(why) .. ').') or 'No games found for "' .. q .. '".'
+                            return
+                        end
+                        status.Text = #list .. ' result' .. (#list == 1 and "" or "s") .. ' for "' .. q .. '"'
+                        for i, g in ipairs(list) do gameCard(grid, g, i) end
+                        Theme.recolor(grid)
+                    end)
+                end
+
+                box.FocusLost:Connect(function(enter)
+                    if not enter then return end
+                    local q = string.match(box.Text or "", "^%s*(.-)%s*$") or ""
+                    if q == "" then showHome(false) else showSearch(q) end
+                end)
+                homeB.Activated:Connect(function()
+                    box.Text = ""
+                    showHome(false)
+                end)
+                rf.Activated:Connect(function()
+                    if mode == "search" and lastQuery ~= "" then showSearch(lastQuery) else showHome(true) end
+                end)
+
+                relayout(ent.w, ent.h)
+                showHome(false)
+                Theme.recolor(p)
+            end
+
             -- ---------- PROFILE panel (your Roblox profile info) ----------
             local function openProfile()
                 local root, pent = overlay("profile", 75, 8, 430, 432, "Profile", "My Roblox profile")
@@ -6041,6 +7050,7 @@ task.spawn(function()
                     { "cross", C(120, 255, 170), C(40, 170, 110), openCrosshair, function() return XH.enabled end },
                     { "tp", C(255, 200, 90), C(230, 120, 70), openTeleport },
                     { "server", C(110, 190, 255), C(70, 100, 235), openServers },
+                    { "games", C(255, 140, 200), C(190, 80, 235), openRoblox },
                     { "help", C(150, 160, 255), C(90, 100, 215), openControls },
                 }
                 local n, size, gap = #items, 40, 8
