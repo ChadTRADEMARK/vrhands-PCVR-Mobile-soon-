@@ -47,7 +47,7 @@ local UPDATE_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR
 --   2.0.4 -> 2.0.5 ... 2.0.12 -> 2.1.0 ... 2.1.12 -> 2.2.0 ... 2.12.12 -> 3.0.0
 -- Your Discord/status feed ("version" in status.json) should use the same pattern, and the script
 -- compares versions as NUMBERS (so 2.0.12 is newer than 2.0.4, and 2.1.0 is newer than 2.0.12).
-local SCRIPT_VERSION = "2.0.9"
+local SCRIPT_VERSION = "2.0.11"
 -- Optional: RAW link to a small JSON file YOU host. It feeds the Banwave / Key system / Script rows.
 -- Leave "" to skip. Example file:
 --   { "banwave": "clear", "banwave_note": "No wave reported",
@@ -487,6 +487,7 @@ task.spawn(function()
     -- Camera views. Only YOUR screen moves: your real head stays where it is (the game never sees the camera move).
     S.panelSize = {}   -- remembered menu sizes: slot -> { width, height }
     S.panelScale = {}  -- remembered scale of the Start Menu's Main / Dock / Side panels
+    S.bg = { src = "", mode = "Fill", panelOp = 0.94, strength = 0.6 }   -- custom menu background (Settings)
     S.hudZoom = 1      -- size of the on-screen controls text (RightCtrl), changed by dragging its corner
     S.CAM_VIEWS = { "Normal", "Front", "Hands", "Left Hand", "Right Hand" }
     function S.cycleCam(to)
@@ -1414,6 +1415,58 @@ task.spawn(function()
     -- NoVR_Settings.json (executor workspace folder) a moment after they change, and loaded at the next start.
     -- Delete that file to go back to the defaults.
     local SAVE_FILE = "NoVR_Settings.json"
+    -- ===== key / usage time (Profile > STATUS > KEY ACCESS) =====
+    -- The key service's loader doesn't tell the script when the key ends, so the countdown only shows if the loader (or you) sets
+    --   getgenv().NOVR_KEY_EXPIRES = <unix seconds when the key ends>   (or "lifetime")
+    -- before this script runs. The "using the script for" counters always work: this session, and the total across sessions.
+    do
+        local U = { start = os.time(), base = 0, first = os.time() }
+        S.usage = U
+        local FILE = "NoVR_Usage.json"
+        local HS = game:GetService("HttpService")
+        if type(readfile) == "function" and type(isfile) == "function" then
+            local ok, raw = pcall(function() return isfile(FILE) and readfile(FILE) or nil end)
+            if ok and type(raw) == "string" then
+                local okd, d = pcall(HS.JSONDecode, HS, raw)
+                if okd and type(d) == "table" then
+                    if type(d.total) == "number" and d.total >= 0 and d.total < 1e9 then U.base = d.total end
+                    if type(d.first) == "number" and d.first > 0 then U.first = d.first end
+                end
+            end
+        end
+        function U.session() return math.max(os.time() - U.start, 0) end
+        function U.total() return U.base + U.session() end
+        function U.expires()   -- unix seconds, "lifetime", or nil when nothing was provided
+            local env = (getgenv and getgenv()) or _G
+            local v = env.NOVR_KEY_EXPIRES
+            if type(v) == "string" then
+                if string.lower(v) == "lifetime" then return "lifetime" end
+                v = tonumber(v)
+            end
+            if type(v) ~= "number" or v ~= v then return nil end
+            if v <= 0 or v == math.huge then return "lifetime" end
+            if v > 1e12 then v = v / 1000 end   -- milliseconds
+            return v
+        end
+        function U.fmt(sec)
+            sec = math.max(math.floor(sec), 0)
+            local d, h, m, s = sec // 86400, (sec % 86400) // 3600, (sec % 3600) // 60, sec % 60
+            if d > 0 then return string.format("%dd %02dh %02dm %02ds", d, h, m, s) end
+            return string.format("%dh %02dm %02ds", h, m, s)
+        end
+        local function save()
+            if type(writefile) == "function" then
+                pcall(function() writefile(FILE, HS:JSONEncode({ total = U.total(), first = U.first })) end)
+            end
+        end
+        task.spawn(function()
+            while true do
+                task.wait(30)
+                save()
+            end
+        end)
+    end
+
     local S_KEYS = {
         "scale", "sens", "moveK", "slowFactor", "tpDist", "spread", "height", "handSens", "aimSens", "handRange",
         "reachL", "reachR", "handLX", "handLY", "handRX", "handRY",
@@ -1422,7 +1475,7 @@ task.spawn(function()
     }
     local Save = { last = nil, ok = (type(writefile) == "function" and type(readfile) == "function") }
     function Save.snapshot()
-        local d = { s = {}, xh = {}, theme = { hue = Theme.hue, size = Theme.size }, panels = S.panelSize, pscale = S.panelScale }
+        local d = { s = {}, xh = {}, theme = { hue = Theme.hue, size = Theme.size }, panels = S.panelSize, pscale = S.panelScale, bg = S.bg }
         for _, k in ipairs(S_KEYS) do d.s[k] = S[k] end
         for k, v in pairs(XH) do
             if k ~= "dirty" then
@@ -1463,6 +1516,13 @@ task.spawn(function()
                 end
             end
             XH.dirty = true
+        end
+        if type(d.bg) == "table" then
+            local b = d.bg
+            if type(b.src) == "string" and #b.src < 400 then S.bg.src = b.src end
+            if b.mode == "Fill" or b.mode == "Fit" or b.mode == "Tile" then S.bg.mode = b.mode end
+            if type(b.panelOp) == "number" and b.panelOp >= 0.3 and b.panelOp <= 1 then S.bg.panelOp = b.panelOp end
+            if type(b.strength) == "number" and b.strength >= 0 and b.strength <= 1 then S.bg.strength = b.strength end
         end
         if type(d.pscale) == "table" then
             for slot, v in pairs(d.pscale) do
@@ -3207,6 +3267,9 @@ task.spawn(function()
                 bar(0.73, 0.27, 0.36, 0.36, 0, false)
                 bar(0.27, 0.73, 0.36, 0.36, 0, false)
                 bar(0.73, 0.73, 0.36, 0.36, 0, false)
+            elseif kind == "search" then
+                ring(0.44, 0.44, 0.58, 3)
+                bar(0.76, 0.78, 0.34, 0.13, 45, false)
             elseif kind == "gear" then
                 ring(0.5, 0.5, 0.56, 3.5)
                 bar(0.5, 0.08, 0.14, 0.2, 0, false)
@@ -3713,6 +3776,116 @@ task.spawn(function()
             tw(back, 0.5, { BackgroundTransparency = 0.45 })
             me.back = back
 
+            -- ===== custom background (Settings > Custom background): a picture behind the menus =====
+            do
+                local HttpService = game:GetService("HttpService")
+                local bgImg = Instance.new("ImageLabel")
+                bgImg.Name = "CustomBg"
+                bgImg.Size = UDim2.fromScale(1, 1)
+                bgImg.BackgroundTransparency = 1
+                bgImg.BorderSizePixel = 0
+                bgImg.Active = false
+                bgImg.ZIndex = 1
+                bgImg.Visible = false
+                bgImg:SetAttribute("tc", true)
+                bgImg.Parent = back
+                S.bgCache = S.bgCache or {}
+                local token = 0
+                local function djb(s)
+                    local h = 5381
+                    for i = 1, #s do h = (h * 33 + string.byte(s, i)) % 4294967296 end
+                    return string.format("%08x", h)
+                end
+                -- turns what the user typed into something an ImageLabel can show (or nil + reason)
+                local function resolve(src)
+                    if S.bgCache[src] then return S.bgCache[src] end
+                    local asset
+                    if string.match(src, "^%d+$") then
+                        asset = "rbxassetid://" .. src
+                    elseif string.sub(src, 1, 13) == "rbxassetid://" or string.sub(src, 1, 9) == "rbxthumb:" or string.sub(src, 1, 7) == "rbxasset" then
+                        asset = src
+                    else
+                        local gca = getcustomasset or getsynasset
+                        if not gca then return nil, "This executor can't show your own pictures." end
+                        local file = src
+                        if string.match(src, "^https?://") then
+                            if not writefile then return nil, "This executor can't save files." end
+                            local req = (syn and syn.request) or http_request or request or (fluxus and fluxus.request)
+                            local body
+                            if req then
+                                local ok, r = pcall(req, { Url = src, Method = "GET" })
+                                if ok and type(r) == "table" and (r.Success or r.StatusCode == 200) then body = r.Body end
+                            end
+                            if not body then
+                                local ok, r = pcall(function() return game:HttpGet(src, true) end)
+                                if ok then body = r end
+                            end
+                            if type(body) ~= "string" or #body < 16 then return nil, "Couldn't download that link." end
+                            local ext
+                            if string.sub(body, 1, 4) == "\137PNG" then ext = "png"
+                            elseif string.sub(body, 1, 3) == "\255\216\255" then ext = "jpg"
+                            elseif string.sub(body, 1, 2) == "BM" then ext = "bmp" end
+                            if not ext then return nil, "That link isn't a PNG / JPG picture (WebP and GIF don't work)." end
+                            file = "NoVR_bg_" .. djb(src) .. "." .. ext
+                            if not pcall(writefile, file, body) then return nil, "Couldn't save the picture." end
+                        else
+                            if not (isfile and isfile(file)) then return nil, "No such file in your workspace folder: " .. file end
+                        end
+                        local ok, a = pcall(gca, file)
+                        if not (ok and a) then return nil, "This executor couldn't open that picture." end
+                        asset = a
+                    end
+                    S.bgCache[src] = asset
+                    return asset
+                end
+                -- applies S.bg to the picture, the panel opacity; cb(ok, message) is called when it's done
+                function me.applyBg(cb)
+                    token += 1
+                    local my = token
+                    local B = S.bg
+                    for _, e in ipairs(me.panels) do
+                        local f = e.p and e.p:FindFirstChild("Bg")
+                        if f then f.BackgroundTransparency = 1 - B.panelOp end
+                    end
+                    if B.src == "" then
+                        bgImg.Visible = false
+                        if cb then cb(true, "No custom background.") end
+                        return
+                    end
+                    task.spawn(function()
+                        local asset, why = resolve(B.src)
+                        if my ~= token or startGui ~= g then return end
+                        if not asset then
+                            bgImg.Visible = false
+                            if cb then cb(false, why or "Couldn't load that picture.") end
+                            return
+                        end
+                        bgImg.Image = asset
+                        if B.mode == "Tile" then
+                            bgImg.ScaleType = Enum.ScaleType.Tile
+                            bgImg.TileSize = UDim2.fromOffset(256, 256)
+                        elseif B.mode == "Fit" then
+                            bgImg.ScaleType = Enum.ScaleType.Fit
+                        else
+                            bgImg.ScaleType = Enum.ScaleType.Crop
+                        end
+                        bgImg.ImageTransparency = 1 - B.strength
+                        bgImg.Visible = true
+                        if cb then cb(true, "Applied.") end
+                    end)
+                end
+                -- cheap live update while a slider is dragged
+                function me.bgLive()
+                    local B = S.bg
+                    bgImg.ImageTransparency = 1 - B.strength
+                    for _, e in ipairs(me.panels) do
+                        local f = e.p and e.p:FindFirstChild("Bg")
+                        if f then f.BackgroundTransparency = 1 - B.panelOp end
+                    end
+                end
+                me.applyBg()
+            end
+
             local PW, PH, MAINW = 830, 440, 570
             local wrap = Instance.new("Frame")
             wrap.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -3775,7 +3948,7 @@ task.spawn(function()
                 bg.Name = "Bg"
                 bg.Size = UDim2.fromScale(1, 1)
                 bg.BackgroundColor3 = Color3.new(1, 1, 1)
-                bg.BackgroundTransparency = 0.06
+                bg.BackgroundTransparency = 1 - S.bg.panelOp
                 bg.BorderSizePixel = 0
                 bg.ZIndex = 1
                 bg.Active = false
@@ -3919,9 +4092,9 @@ task.spawn(function()
 
             local main, mainEnt = makePanel(0, 0, MAINW, PH, "Panel", 0)
             -- wide enough for the FPS box on the left, the PING box on the right and every dock icon between them
-            local DOCKW = 780
+            local DOCKW = 830
             local dock, dockEnt = makePanel((PW - DOCKW) / 2, PH + 22, DOCKW, 62, "Dock", 0.2)
-            local side, sideEnt = makePanel(MAINW + 14, 90, 246, 360, "Side", 0.12)
+            local side, sideEnt = makePanel(MAINW + 14, 90, 246, 406, "Side", 0.12)
             -- the Main window, the Dock and the Side panel each scale on their own: drag the corner handle (saved)
             -- (Settings > Menu size still scales the whole Start Menu at once)
             for _, def in ipairs({ { "main", main, mainEnt }, { "dock", dock, dockEnt }, { "side", side, sideEnt } }) do
@@ -4040,7 +4213,7 @@ task.spawn(function()
             -- generic overlay: panel + title + close button. Calling it again
             -- while it is open closes it (toggle).
             local function overlay(slot, x, y, w, h, name, title)
-                for _, other in ipairs({ "controls", "settings", "crosshair", "teleport", "profile", "servers", "roblox" }) do
+                for _, other in ipairs({ "controls", "settings", "crosshair", "teleport", "profile", "servers", "roblox", "search" }) do
                     if other ~= slot and me[other] and not me[other].closed then
                         me[other].close(); me[other] = nil
                     end
@@ -4417,6 +4590,147 @@ task.spawn(function()
                 end)
 
                 lbl(p, "Size also scales the touch HUD and the PC menu.", 20, 324, 310, 20, 10, MUTED)
+                -- ---- Movement speed (1 - 100) ----
+                lbl(p, "Speed (1 - 100)", 20, 358, 200, 18, 12, MUTED)
+                local spN = math.clamp(math.floor(S.moveK * 100 + 0.5), 1, 100)   -- 16 = the original default speed
+                local fsVal = lbl(p, tostring(spN), 230, 358, 100, 18, 12, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Right)
+                hslider(p, 20, 394, 310, (spN - 1) / 99, false, function(f)
+                    local n = math.floor(1 + f * 99 + 0.5)
+                    S.moveK = n / 100
+                    fsVal.Text = tostring(n)
+                end)
+
+                -- ---- Custom background ----
+                lbl(p, "Custom background", 20, 414, 310, 20, 14, WHITE, Enum.Font.GothamBlack)
+                local function tile(x, text, action)
+                    local t = Instance.new("TextButton")
+                    t.Position = UDim2.fromOffset(x, 442)
+                    t.Size = UDim2.fromOffset(96, 56)
+                    t.AutoButtonColor = false
+                    t.BackgroundColor3 = PINK
+                    t.BackgroundTransparency = 0.8
+                    t.BorderSizePixel = 0
+                    t.Text = text
+                    t.Font = Enum.Font.GothamBold
+                    t.TextSize = 12
+                    t.TextColor3 = WHITE
+                    t.ZIndex = 5
+                    t.Parent = p
+                    corner(t, 10)
+                    local ring = stroke(t, WHITE, 2, 1)
+                    t.InputBegan:Connect(function(io) if isPress(io) then ripple(t, io, fit.Scale) end end)
+                    t.Activated:Connect(action)
+                    return t, ring
+                end
+                local bgBox = Instance.new("TextBox")
+                bgBox.Position = UDim2.fromOffset(20, 508)
+                bgBox.Size = UDim2.fromOffset(310, 30)
+                bgBox.BackgroundColor3 = PINK
+                bgBox.BackgroundTransparency = 0.85
+                bgBox.BorderSizePixel = 0
+                bgBox.Text = (S.bg.src ~= "" and #S.bg.src < 200) and S.bg.src or ""
+                bgBox.PlaceholderText = "Image link, workspace file or asset id"
+                bgBox.PlaceholderColor3 = MUTED
+                bgBox.ClearTextOnFocus = false
+                bgBox.Font = Enum.Font.GothamMedium
+                bgBox.TextSize = 12
+                bgBox.TextColor3 = WHITE
+                bgBox.TextXAlignment = Enum.TextXAlignment.Left
+                bgBox.ClipsDescendants = true
+                bgBox.ZIndex = 5
+                bgBox.Parent = p
+                corner(bgBox, 9)
+                local bgPad = Instance.new("UIPadding"); bgPad.PaddingLeft = UDim.new(0, 10); bgPad.Parent = bgBox
+                local bgMsg = lbl(p, "PNG / JPG only. Link, file in your workspace folder, or a Roblox image id.", 20, 544, 310, 14, 10, MUTED, Enum.Font.GothamMedium)
+                bgMsg.TextTruncate = Enum.TextTruncate.None
+                local noneT, noneRing = tile(20, "NONE", function() end)
+                local addT = tile(126, "+ ADD", function() bgBox:CaptureFocus() end)
+                local curT = tile(232, "", function() end)
+                local curImg = Instance.new("ImageLabel")
+                curImg.Size = UDim2.fromScale(1, 1)
+                curImg.BackgroundTransparency = 1
+                curImg.ScaleType = Enum.ScaleType.Crop
+                curImg.Visible = false
+                curImg.ZIndex = 6
+                curImg.Active = false
+                curImg:SetAttribute("tc", true)
+                curImg.Parent = curT
+                corner(curImg, 10)
+                local function refreshTiles()
+                    noneT.BackgroundTransparency = (S.bg.src == "") and 0.3 or 0.8
+                    tw(noneRing, 0.2, { Transparency = (S.bg.src == "") and 0.1 or 1 })
+                    curT.Text = (S.bg.src ~= "") and "" or "-"
+                    curT.BackgroundTransparency = (S.bg.src ~= "") and 0.3 or 0.9
+                    local a = S.bgCache and S.bgCache[S.bg.src]
+                    curImg.Visible = a ~= nil and S.bg.src ~= ""
+                    if a then curImg.Image = a end
+                end
+                local function setMsg(ok, m)
+                    if bgMsg.Parent then
+                        bgMsg.Text = m
+                        bgMsg.TextColor3 = ok and GREEN or C(255, 130, 140)
+                        bgMsg:SetAttribute("tc", true)
+                    end
+                    if bgMsg.Parent then refreshTiles() end
+                end
+                local function applyText()
+                    local s = string.match(bgBox.Text or "", "^%s*(.-)%s*$") or ""
+                    if #s > 400 then setMsg(false, "That's too long."); return end
+                    S.bg.src = s
+                    bgMsg.Text = (s == "") and "..." or "Loading..."
+                    bgMsg.TextColor3 = MUTED
+                    me.applyBg(setMsg)
+                end
+                noneT.Activated:Connect(function()
+                    S.bg.src = ""
+                    bgBox.Text = ""
+                    me.applyBg(setMsg)
+                end)
+                bgBox.FocusLost:Connect(function(enter) if enter then applyText() end end)
+                refreshTiles()
+
+                lbl(p, "Panel opacity", 20, 568, 200, 18, 12, MUTED)
+                local opV = lbl(p, math.floor(S.bg.panelOp * 100 + 0.5) .. "%", 230, 568, 100, 18, 12, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Right)
+                hslider(p, 20, 604, 310, (S.bg.panelOp - 0.3) / 0.7, false, function(f)
+                    S.bg.panelOp = math.floor((0.3 + f * 0.7) * 100 + 0.5) / 100
+                    opV.Text = math.floor(S.bg.panelOp * 100 + 0.5) .. "%"
+                    me.bgLive()
+                end)
+                lbl(p, "Background strength", 20, 628, 200, 18, 12, MUTED)
+                local stV = lbl(p, math.floor(S.bg.strength * 100 + 0.5) .. "%", 230, 628, 100, 18, 12, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Right)
+                hslider(p, 20, 664, 310, S.bg.strength, false, function(f)
+                    S.bg.strength = math.floor(f * 100 + 0.5) / 100
+                    stV.Text = math.floor(S.bg.strength * 100 + 0.5) .. "%"
+                    me.bgLive()
+                end)
+                lbl(p, "Picture fit", 20, 688, 200, 18, 12, MUTED)
+                local fitB = {}
+                for i, m in ipairs({ "Fill", "Fit", "Tile" }) do
+                    local b = Instance.new("TextButton")
+                    b.Position = UDim2.fromOffset(20 + (i - 1) * 108, 712)
+                    b.Size = UDim2.fromOffset(94, 28)
+                    b.AutoButtonColor = false
+                    b.BackgroundColor3 = PINK
+                    b.BorderSizePixel = 0
+                    b.Text = string.upper(m)
+                    b.Font = Enum.Font.GothamBold
+                    b.TextSize = 11
+                    b.TextColor3 = WHITE
+                    b.ZIndex = 5
+                    b.Parent = p
+                    corner(b, 9)
+                    fitB[m] = b
+                    b.InputBegan:Connect(function(io) if isPress(io) then ripple(b, io, fit.Scale) end end)
+                    b.Activated:Connect(function()
+                        S.bg.mode = m
+                        for k, bb in pairs(fitB) do bb.BackgroundTransparency = (k == m) and 0.2 or 0.8 end
+                        me.applyBg()
+                    end)
+                end
+                for k, bb in pairs(fitB) do bb.BackgroundTransparency = (k == S.bg.mode) and 0.2 or 0.8 end
+                local note = lbl(p, "Blur and saturation can't be done in Roblox menus. Your choices are saved automatically.", 20, 748, 310, 28, 10, MUTED, Enum.Font.GothamMedium)
+                note.TextWrapped = true
+                note.TextTruncate = Enum.TextTruncate.None
                 ent.scrollify(50)
                 Theme.recolor(p)
             end
@@ -5093,6 +5407,326 @@ task.spawn(function()
                     if writefile then writefile(RECENT_FILE, game:GetService("HttpService"):JSONEncode(Recent)) end
                 end)
                 end)
+            end
+
+            -- ---------- SEARCH panel (Google search without leaving the game) ----------
+            -- Results come from Google's plain-HTML results page, and from DuckDuckGo when Google refuses the request (it often
+            -- blocks scripts). The suggestions under the box come from Google's public suggest endpoint. No account or key needed.
+            -- Tap a result to copy its link (Roblox can't open a web browser from here).
+            local function openSearch()
+                local p, ent = overlay("search", 24, 10, 740, 440, "Search", "Google Search")
+                if not p then return end
+                local HttpService = game:GetService("HttpService")
+                local req  = (syn and syn.request) or http_request or request or (fluxus and fluxus.request)
+                local clip = setclipboard or toclipboard
+
+                local function webGet(url, headers)
+                    local code
+                    if req then
+                        local ok, r = pcall(req, { Url = url, Method = "GET", Headers = headers or { Accept = "*/*" } })
+                        if ok and type(r) == "table" then
+                            code = r.StatusCode
+                            if (r.Success or r.StatusCode == 200) and type(r.Body) == "string" and #r.Body > 0 then return r.Body, code end
+                        end
+                    end
+                    local ok, res = pcall(function() return game:HttpGet(url, true) end)
+                    if ok and type(res) == "string" and #res > 0 then return res, 200 end
+                    return nil, code
+                end
+                local function urlDecode(s)
+                    s = string.gsub(s, "+", " ")
+                    return (string.gsub(s, "%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end))
+                end
+                local function clean(s)
+                    s = tostring(s or "")
+                    s = string.gsub(s, "<[^>]*>", "")
+                    s = string.gsub(s, "&#x(%x+);", function(h) local n = tonumber(h, 16); return (n and n < 128) and string.char(n) or "'" end)
+                    s = string.gsub(s, "&#(%d+);", function(d) local n = tonumber(d); return (n and n < 128) and string.char(n) or "'" end)
+                    s = string.gsub(s, "&amp;", "&"); s = string.gsub(s, "&quot;", '"'); s = string.gsub(s, "&lt;", "<")
+                    s = string.gsub(s, "&gt;", ">"); s = string.gsub(s, "&nbsp;", " "); s = string.gsub(s, "&#39;", "'")
+                    s = string.gsub(s, "%s+", " ")
+                    return (string.match(s, "^%s*(.-)%s*$"))
+                end
+                local function hostOf(u) return string.match(u, "^https?://([^/]+)") or u end
+
+                -- Google basic-HTML results: <a href="/url?q=REAL_URL&sa=..."> ... <h3>title</h3> ... snippet
+                local function parseGoogle(body)
+                    local out, pos = {}, 1
+                    while #out < 12 do
+                        local s, e, link = string.find(body, '<a href="/url%?q=([^"&]+)[^"]*"', pos)
+                        if not s then break end
+                        pos = e + 1
+                        local nextS = string.find(body, '<a href="/url%?q=', pos) or #body
+                        local chunk = string.sub(body, e, math.min(nextS, e + 2500))
+                        local url = urlDecode(link)
+                        local title = string.match(chunk, "<h3[^>]*>(.-)</h3>")
+                        if title and string.match(url, "^https?://") and not string.find(url, "google.com/", 1, true) then
+                            local snippet = ""
+                            local after = string.match(chunk, "</h3>(.*)") or ""
+                            for div in string.gmatch(after, "<div[^>]*>(.-)</div>") do
+                                local c = clean(div)
+                                if #c > 40 then snippet = c break end
+                            end
+                            out[#out + 1] = { title = clean(title), url = url, snippet = snippet }
+                        end
+                    end
+                    return out
+                end
+                -- DuckDuckGo HTML results
+                local function parseDDG(body)
+                    local out, pos = {}, 1
+                    while #out < 12 do
+                        local s, e, href, title = string.find(body, 'class="result__a"[^>]-href="([^"]+)"[^>]*>(.-)</a>', pos)
+                        if not s then break end
+                        pos = e + 1
+                        local nextS = string.find(body, 'class="result__a"', pos) or #body
+                        local chunk = string.sub(body, pos, nextS)
+                        local url = string.match(href, "uddg=([^&]+)")
+                        url = url and urlDecode(url) or href
+                        if string.sub(url, 1, 2) == "//" then url = "https:" .. url end
+                        local snippet = string.match(chunk, 'class="result__snippet"[^>]*>(.-)</a>') or ""
+                        if string.match(url, "^https?://") then
+                            out[#out + 1] = { title = clean(title), url = url, snippet = clean(snippet) }
+                        end
+                    end
+                    return out
+                end
+
+                local function search(q)
+                    local enc = HttpService:UrlEncode(q)
+                    local ua = { ["User-Agent"] = "Lynx/2.8.9rel.1 libwww-FM/2.14 SSL-MM/1.4.1 OpenSSL/1.1.1", ["Accept-Language"] = "en-US,en;q=0.9" }
+                    local body = webGet("https://www.google.com/search?q=" .. enc .. "&hl=en&num=10&gbv=1", ua)
+                    if body then
+                        local list = parseGoogle(body)
+                        if #list > 0 then return list, "Google" end
+                    end
+                    local body2, code = webGet("https://html.duckduckgo.com/html/?q=" .. enc, ua)
+                    if body2 then
+                        local list = parseDDG(body2)
+                        if #list > 0 then return list, "DuckDuckGo (Google didn't answer)" end
+                    end
+                    return {}, nil, code
+                end
+                local function suggest(q)
+                    local body = webGet("https://suggestqueries.google.com/complete/search?client=firefox&q=" .. HttpService:UrlEncode(q))
+                    if not body then return {} end
+                    local ok, d = pcall(HttpService.JSONDecode, HttpService, body)
+                    local out = {}
+                    if ok and type(d) == "table" and type(d[2]) == "table" then
+                        for _, s in ipairs(d[2]) do
+                            if type(s) == "string" and #out < 6 then out[#out + 1] = s end
+                        end
+                    end
+                    return out
+                end
+
+                -- ===== layout =====
+                local function mkBtn(text, x, y, w, h, size)
+                    local b = Instance.new("TextButton")
+                    b.Position = UDim2.fromOffset(x, y)
+                    b.Size = UDim2.fromOffset(w, h)
+                    b.AutoButtonColor = false
+                    b.BackgroundColor3 = PINK
+                    b.BackgroundTransparency = 0.8
+                    b.BorderSizePixel = 0
+                    b.Text = text
+                    b.Font = Enum.Font.GothamBold
+                    b.TextSize = size or 12
+                    b.TextColor3 = WHITE
+                    b.ZIndex = 5
+                    b.Parent = p
+                    corner(b, 9)
+                    b.InputBegan:Connect(function(io) if isPress(io) then ripple(b, io, fit.Scale) end end)
+                    return b
+                end
+                local box = Instance.new("TextBox")
+                box.Position = UDim2.fromOffset(20, 56)
+                box.Size = UDim2.fromOffset(530, 34)
+                box.BackgroundColor3 = PINK
+                box.BackgroundTransparency = 0.85
+                box.BorderSizePixel = 0
+                box.Text = ""
+                box.PlaceholderText = "Search Google..."
+                box.PlaceholderColor3 = MUTED
+                box.ClearTextOnFocus = false
+                box.Font = Enum.Font.GothamMedium
+                box.TextSize = 14
+                box.TextColor3 = WHITE
+                box.TextXAlignment = Enum.TextXAlignment.Left
+                box.ClipsDescendants = true
+                box.ZIndex = 5
+                box.Parent = p
+                corner(box, 10)
+                local bpad = Instance.new("UIPadding"); bpad.PaddingLeft = UDim.new(0, 12); bpad.Parent = box
+                local goB = mkBtn("SEARCH", 560, 56, 100, 34, 12)
+                goB.BackgroundTransparency = 0.15
+                local clr = mkBtn("CLEAR", 666, 56, 54, 34, 10)
+                local status = lbl(p, "Type a search and press Enter. Tap a result to copy its link.", 20, 96, 700, 14, 11, MUTED, Enum.Font.GothamBold)
+
+                local page = Instance.new("ScrollingFrame")
+                page.Position = UDim2.fromOffset(12, 116)
+                page.Size = UDim2.fromOffset(716, 312)
+                page.BackgroundTransparency = 1
+                page.BorderSizePixel = 0
+                page.ScrollBarThickness = 4
+                page.CanvasSize = UDim2.new()
+                page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+                page.ScrollingDirection = Enum.ScrollingDirection.Y
+                page.ZIndex = 2
+                page.Parent = p
+                local list = Instance.new("UIListLayout")
+                list.Padding = UDim.new(0, 8)
+                list.SortOrder = Enum.SortOrder.LayoutOrder
+                list.Parent = page
+
+                -- suggestion drop-down (sits over the results)
+                local sug = Instance.new("Frame")
+                sug.Position = UDim2.fromOffset(20, 92)
+                sug.Size = UDim2.fromOffset(530, 0)
+                sug.BackgroundColor3 = C(26, 12, 70)
+                sug.BackgroundTransparency = 0.03
+                sug.BorderSizePixel = 0
+                sug.ZIndex = 12
+                sug.Visible = false
+                sug.Parent = p
+                corner(sug, 10)
+                stroke(sug, WHITE, 1.5, 0.6)
+                local sl = Instance.new("UIListLayout"); sl.SortOrder = Enum.SortOrder.LayoutOrder; sl.Parent = sug
+
+                local function relayout(nw, nh)
+                    local inner = nw - 40
+                    box.Size = UDim2.fromOffset(inner - 190, 34)
+                    goB.Position = UDim2.fromOffset(20 + inner - 180, 56)
+                    clr.Position = UDim2.fromOffset(20 + inner - 74, 56)
+                    sug.Size = UDim2.fromOffset(inner - 190, sug.Size.Y.Offset)
+                    status.Size = UDim2.fromOffset(inner, 14)
+                    page.Size = UDim2.fromOffset(nw - 24, math.max(nh - 116 - 12, 60))
+                end
+                ent.onResize = relayout
+
+                local token, lastQ = 0, ""
+                local function clearPage()
+                    for _, c in ipairs(page:GetChildren()) do
+                        if c:IsA("GuiObject") then c:Destroy() end
+                    end
+                    page.CanvasPosition = Vector2.zero
+                end
+                local function hideSug()
+                    for _, c in ipairs(sug:GetChildren()) do
+                        if c:IsA("GuiObject") then c:Destroy() end
+                    end
+                    sug.Visible = false
+                end
+
+                local function resultCard(r, i)
+                    local card = Instance.new("TextButton")
+                    card.LayoutOrder = i
+                    card.Size = UDim2.new(1, -10, 0, 92)
+                    card.AutoButtonColor = false
+                    card.BackgroundColor3 = PINK
+                    card.BackgroundTransparency = 0.88
+                    card.BorderSizePixel = 0
+                    card.Text = ""
+                    card.Parent = page
+                    corner(card, 10)
+                    local ring = stroke(card, WHITE, 1.5, 1)
+                    card.MouseEnter:Connect(function() tw(ring, 0.2, { Transparency = 0.5 }, Enum.EasingStyle.Sine) end)
+                    card.MouseLeave:Connect(function() tw(ring, 0.25, { Transparency = 1 }, Enum.EasingStyle.Sine) end)
+                    local t = lbl(card, r.title, 14, 8, 600, 20, 14, WHITE, Enum.Font.GothamBlack)
+                    t.Size = UDim2.new(1, -28, 0, 20)
+                    local u = lbl(card, hostOf(r.url), 14, 29, 600, 14, 11, GREEN, Enum.Font.GothamBold)
+                    u.Size = UDim2.new(1, -28, 0, 14)
+                    u:SetAttribute("tc", true)
+                    local sn = lbl(card, r.snippet ~= "" and r.snippet or r.url, 14, 46, 600, 40, 11, MUTED, Enum.Font.GothamMedium)
+                    sn.Size = UDim2.new(1, -28, 0, 40)
+                    sn.TextWrapped = true
+                    sn.TextYAlignment = Enum.TextYAlignment.Top
+                    sn.TextTruncate = Enum.TextTruncate.AtEnd
+                    card.Activated:Connect(function()
+                        if clip then
+                            pcall(clip, r.url)
+                            status.Text = "Link copied: " .. r.url
+                        else
+                            status.Text = r.url
+                        end
+                    end)
+                    return card
+                end
+
+                local function run(q)
+                    q = string.match(q or "", "^%s*(.-)%s*$") or ""
+                    hideSug()
+                    if q == "" then return end
+                    token = token + 1
+                    local my = token
+                    lastQ = q
+                    box.Text = q
+                    clearPage()
+                    status.Text = 'Searching "' .. q .. '"...'
+                    task.spawn(function()
+                        local res, src, code = search(q)
+                        if my ~= token or ent.closed then return end
+                        if #res == 0 then
+                            status.Text = "No results came back" .. (code and (" (HTTP " .. tostring(code) .. ")") or "") .. ". Google may be blocking this request - try again in a moment."
+                            return
+                        end
+                        status.Text = #res .. ' results for "' .. q .. '" via ' .. src .. ".  Tap a result to copy its link."
+                        for i, r in ipairs(res) do resultCard(r, i) end
+                        Theme.recolor(page)
+                    end)
+                end
+
+                -- suggestions while typing (checked a few times a second, so it never hammers the server)
+                task.spawn(function()
+                    local shown = ""
+                    while p.Parent and not ent.closed do
+                        task.wait(0.4)
+                        local txt = string.match(box.Text or "", "^%s*(.-)%s*$") or ""
+                        if txt ~= shown and txt ~= lastQ then
+                            shown = txt
+                            if #txt < 2 then
+                                hideSug()
+                            else
+                                local items = suggest(txt)
+                                if p.Parent and not ent.closed and shown == txt and #items > 0 then
+                                    hideSug()
+                                    for i, s in ipairs(items) do
+                                        local b = Instance.new("TextButton")
+                                        b.LayoutOrder = i
+                                        b.Size = UDim2.new(1, 0, 0, 28)
+                                        b.AutoButtonColor = false
+                                        b.BackgroundTransparency = 1
+                                        b.Text = "  " .. s
+                                        b.Font = Enum.Font.GothamMedium
+                                        b.TextSize = 12
+                                        b.TextColor3 = WHITE
+                                        b.TextXAlignment = Enum.TextXAlignment.Left
+                                        b.ZIndex = 13
+                                        b.Parent = sug
+                                        b.Activated:Connect(function() shown = s; run(s) end)
+                                    end
+                                    sug.Size = UDim2.fromOffset(sug.Size.X.Offset, #items * 28)
+                                    sug.Visible = true
+                                    Theme.recolor(sug)
+                                end
+                            end
+                        end
+                    end
+                end)
+
+                box.FocusLost:Connect(function(enter) if enter then run(box.Text) end end)
+                goB.Activated:Connect(function() run(box.Text) end)
+                clr.Activated:Connect(function()
+                    token = token + 1
+                    box.Text = ""
+                    lastQ = ""
+                    hideSug()
+                    clearPage()
+                    status.Text = "Type a search and press Enter. Tap a result to copy its link."
+                end)
+
+                relayout(ent.w, ent.h)
+                Theme.recolor(p)
             end
 
             local function openRoblox()
@@ -6477,6 +7111,11 @@ task.spawn(function()
                     local rKey = sRow("Key system", "checking...")
                     local rMsg = sRow("Notice", "-")
 
+                    sSection("KEY ACCESS  (live)")
+                    local rKeyLeft = sRow("Key time left", "...")
+                    local rKeyUsed = sRow("Using script for", "-")
+                    local rKeyTot  = sRow("Total time used", "-")
+
                     sSection("SCRIPT")
                     sRow("Script version", "v" .. SCRIPT_VERSION)
                     local rNew    = sRow("Latest version", "checking...")
@@ -6641,6 +7280,21 @@ task.spawn(function()
                             rAU.set(AU.text, AU.level)
                             local t = math.floor(workspace.DistributedGameTime)
                             rUp.set(string.format("%dh %02dm %02ds", t // 3600, (t % 3600) // 60, t % 60))
+                            do
+                                local U = S.usage
+                                local ex = U.expires()
+                                if ex == nil then
+                                    rKeyLeft.set("Not shared by key system", nil)
+                                elseif ex == "lifetime" then
+                                    rKeyLeft.set("Lifetime", "ok")
+                                else
+                                    local left = ex - os.time()
+                                    if left <= 0 then rKeyLeft.set("Expired", "bad")
+                                    else rKeyLeft.set(U.fmt(left), left < 3600 and "bad" or (left < 86400 and "warn" or "ok")) end
+                                end
+                                rKeyUsed.set(U.fmt(U.session()))
+                                rKeyTot.set(U.fmt(U.total()))
+                            end
 
                             task.wait(0.5)
                             sinceWeb += 0.5
@@ -7051,6 +7705,7 @@ task.spawn(function()
                     { "tp", C(255, 200, 90), C(230, 120, 70), openTeleport },
                     { "server", C(110, 190, 255), C(70, 100, 235), openServers },
                     { "games", C(255, 140, 200), C(190, 80, 235), openRoblox },
+                    { "search", C(110, 170, 255), C(90, 90, 235), openSearch },
                     { "help", C(150, 160, 255), C(90, 100, 215), openControls },
                 }
                 local n, size, gap = #items, 40, 8
@@ -7153,7 +7808,7 @@ task.spawn(function()
 
             -- vertical size slider
             local track = Instance.new("Frame")
-            track.Position = UDim2.fromOffset(196, 52)
+            track.Position = UDim2.fromOffset(178, 52)
             track.Size = UDim2.fromOffset(12, 140)
             track.BackgroundColor3 = Color3.new(1, 1, 1)
             track.BackgroundTransparency = 0.85
@@ -7189,13 +7844,15 @@ task.spawn(function()
             thumbSh.ZIndex = 2
             thumbSh.Parent = thumb
             corner(thumbSh, 11)
-            local sval = lbl(side, "SIZE 10", 166, 200, 76, 16, 11, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+            local sval = lbl(side, "SIZE\n10", 166, 200, 40, 28, 10, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+            sval.TextWrapped = true
+            sval.TextTruncate = Enum.TextTruncate.None
 
             local sliderHit = Instance.new("TextButton")
             sliderHit.Text = ""
             sliderHit.BackgroundTransparency = 1
-            sliderHit.Position = UDim2.fromOffset(176, 40)
-            sliderHit.Size = UDim2.fromOffset(46, 160)
+            sliderHit.Position = UDim2.fromOffset(166, 40)
+            sliderHit.Size = UDim2.fromOffset(34, 160)
             sliderHit.ZIndex = 6
             sliderHit.Parent = side
             sliderHit.InputBegan:Connect(function(input)
@@ -7218,9 +7875,89 @@ task.spawn(function()
                 end)
             end)
 
+            -- vertical speed slider (1 - 100), right next to the size slider
+            local track2 = Instance.new("Frame")
+            track2.Position = UDim2.fromOffset(214, 52)
+            track2.Size = UDim2.fromOffset(12, 140)
+            track2.BackgroundColor3 = Color3.new(1, 1, 1)
+            track2.BackgroundTransparency = 0.85
+            track2.BorderSizePixel = 0
+            track2.Parent = side
+            corner(track2, 6)
+            local fill2 = Instance.new("Frame")
+            fill2.AnchorPoint = Vector2.new(0, 1)
+            fill2.Position = UDim2.fromScale(0, 1)
+            fill2.Size = UDim2.fromScale(1, 0.1)
+            fill2.BackgroundColor3 = Color3.new(1, 1, 1)
+            fill2.BorderSizePixel = 0
+            fill2.Parent = track2
+            corner(fill2, 6)
+            grad(fill2, PINK, VIOLET, 90)
+            local thumb2 = Instance.new("Frame")
+            thumb2.AnchorPoint = Vector2.new(0.5, 0.5)
+            thumb2.Position = UDim2.fromScale(0.5, 0.9)
+            thumb2.Size = UDim2.fromOffset(22, 22)
+            thumb2.BackgroundColor3 = WHITE
+            thumb2.BorderSizePixel = 0
+            thumb2.ZIndex = 3
+            thumb2.Parent = track2
+            corner(thumb2, 11)
+            stroke(thumb2, PINK, 2, 0)
+            local sval2 = lbl(side, "SPEED\n16", 204, 200, 40, 28, 10, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+            sval2.TextWrapped = true
+            sval2.TextTruncate = Enum.TextTruncate.None
+            local speedHit = Instance.new("TextButton")
+            speedHit.Text = ""
+            speedHit.BackgroundTransparency = 1
+            speedHit.Position = UDim2.fromOffset(202, 40)
+            speedHit.Size = UDim2.fromOffset(36, 160)
+            speedHit.ZIndex = 6
+            speedHit.Parent = side
+            speedHit.InputBegan:Connect(function(input)
+                if not isPress(input) then return end
+                local function apply()
+                    local f = 1 - (sp(input).Y - track2.AbsolutePosition.Y) / math.max(track2.AbsoluteSize.Y, 1)
+                    S.moveK = math.floor(1 + math.clamp(f, 0, 1) * 99 + 0.5) / 100
+                end
+                apply()
+                local conns = {}
+                local function stop()
+                    for _, c in ipairs(conns) do c:Disconnect() end
+                    conns = {}
+                end
+                conns[1] = RunService.RenderStepped:Connect(apply)
+                conns[2] = UIS.InputEnded:Connect(function(io) if io == input then stop() end end)
+                conns[3] = input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End or input.UserInputState == Enum.UserInputState.Cancel then stop() end
+                end)
+            end)
+
+            -- ===== SEARCH button =====
+            local searchB = Instance.new("TextButton")
+            searchB.Position = UDim2.fromOffset(14, 284)
+            searchB.Size = UDim2.fromOffset(218, 34)
+            searchB.AutoButtonColor = false
+            searchB.BackgroundColor3 = Color3.new(1, 1, 1)
+            searchB.BorderSizePixel = 0
+            searchB.Text = "SEARCH"
+            searchB.Font = Enum.Font.GothamBlack
+            searchB.TextSize = 13
+            searchB.TextColor3 = WHITE
+            searchB.Parent = side
+            corner(searchB, 10)
+            gradButton(searchB, "SEARCH  -  GOOGLE", C(110, 170, 255), C(130, 90, 240), 0, 10, 12, Enum.Font.GothamBlack)
+            stroke(searchB, Color3.new(1, 1, 1), 1.5, 0.2)
+            local ssc = Instance.new("UIScale")
+            ssc.Parent = searchB
+            searchB.MouseEnter:Connect(function() tw(ssc, 0.4, { Scale = 1.04 }, Enum.EasingStyle.Back) end)
+            searchB.MouseLeave:Connect(function() tw(ssc, 0.4, { Scale = 1 }, Enum.EasingStyle.Back) end)
+            searchB.InputBegan:Connect(function(io) if isPress(io) then tw(ssc, 0.1, { Scale = 0.95 }); ripple(searchB, io, fit.Scale) end end)
+            searchB.InputEnded:Connect(function(io) if isPress(io) then tw(ssc, 0.4, { Scale = 1 }, Enum.EasingStyle.Back) end end)
+            searchB.Activated:Connect(openSearch)
+
             -- ===== update button =====
             local upd = Instance.new("TextButton")
-            upd.Position = UDim2.fromOffset(14, 284)
+            upd.Position = UDim2.fromOffset(14, 328)
             upd.Size = UDim2.fromOffset(218, 38)
             upd.AutoButtonColor = false
             upd.BackgroundColor3 = Color3.new(1, 1, 1)
@@ -7235,7 +7972,7 @@ task.spawn(function()
             stroke(upd, Color3.new(1, 1, 1), 1.5, 0.2)
             local usc = Instance.new("UIScale")
             usc.Parent = upd
-            local ustat = lbl(side, "", 14, 326, 218, 16, 10, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+            local ustat = lbl(side, "", 14, 370, 218, 16, 10, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
             ustat.TextTruncate = Enum.TextTruncate.None
             ustat.TextWrapped = true
             ustat.Size = UDim2.fromOffset(218, 22)
@@ -7309,7 +8046,12 @@ task.spawn(function()
                 shownF = shownF + (target - shownF) * math.min(1, dt * 14)
                 fill.Size = UDim2.fromScale(1, math.max(shownF, 0.001))
                 thumb.Position = UDim2.fromScale(0.5, 1 - shownF)
-                sval.Text = "SIZE " .. tostring(math.floor(S.scale))
+                sval.Text = "SIZE\n" .. tostring(math.floor(S.scale))
+                local spN = math.clamp(math.floor(S.moveK * 100 + 0.5), 1, 100)
+                local spF = (spN - 1) / 99
+                fill2.Size = UDim2.fromScale(1, math.max(spF, 0.001))
+                thumb2.Position = UDim2.fromScale(0.5, 1 - spF)
+                sval2.Text = "SPEED\n" .. tostring(spN)
             end)
 
             -- apply the current menu colour to everything that was just built
