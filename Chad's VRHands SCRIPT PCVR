@@ -50,7 +50,7 @@ local UPDATE_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR
 --   2.0.4 -> 2.0.5 ... 2.0.12 -> 2.1.0 ... 2.1.12 -> 2.2.0 ... 2.12.12 -> 3.0.0
 -- Your Discord/status feed ("version" in status.json) should use the same pattern, and the script
 -- compares versions as NUMBERS (so 2.0.12 is newer than 2.0.4, and 2.1.0 is newer than 2.0.12).
-local SCRIPT_VERSION = "2.0.12"
+local SCRIPT_VERSION = "2.0.13"
 -- Optional: RAW link to a small JSON file YOU host. It feeds the Banwave / Key system / Script rows.
 -- Leave "" to skip. Example file:
 --   { "banwave": "clear", "banwave_note": "No wave reported",
@@ -213,6 +213,7 @@ task.spawn(function()
         gui.Name = "NoVR_Boot"
         gui.ResetOnSpawn = false
         gui.IgnoreGuiInset = true
+        pcall(function() gui.ScreenInsets = Enum.ScreenInsets.None end)
         gui.DisplayOrder = 300
         gui.Parent = pg
         local card = Instance.new("Frame")
@@ -431,6 +432,7 @@ end
 do
     local function makeIndex(old)
         return C.newcclosure(function(self, k)
+            if U.normal then return old(self, k) end   -- Normal Avatar mode: the game sees the real (non-VR) answers
             if k == "VREnabled" and (self == VRService or self == UIS) then
                 U.stat.vren = (U.stat.vren or 0) + 1
                 -- smooth camera: the game's own PlayerModule (camera + controls) is told VR is off, every other script is told it is on
@@ -446,6 +448,7 @@ do
     end
     local function makeNamecall(old)
         return C.newcclosure(function(self, ...)
+            if U.normal then return old(self, ...) end
             if self == VRService then
                 local m = C.getnamecallmethod()
                 if m == "GetUserCFrameEnabled" then return true end
@@ -850,6 +853,7 @@ function U.start(lp, S)   -- S = the main script's settings table when the full 
         if dollyApplied then dollyApplied = false; cam.CFrame = dollyBase end
     end)
     local function camStep()
+        if U.normal then lastCam = os.clock() return end
         local now = os.clock()
         local dt = math.clamp(now - lastCam, 1 / 240, 0.1)
         lastCam = now
@@ -996,6 +1000,7 @@ function U.start(lp, S)   -- S = the main script's settings table when the full 
         local now = os.clock()
         local dt = math.min(now - lastT, 0.1)
         lastT = now
+        if U.normal then return end
         -- the camera stands still while Alt is held, or while Hand mode / Aim mode (main menu) is on
         local typing = UIS:GetFocusedTextBox() ~= nil
         local menuUp = emu and (S.menuOpen or typing)
@@ -1214,10 +1219,10 @@ task.spawn(function()
     -- in emulator mode only the controls step runs (and it only handles the hands); the VR Hands camera / head code stays off
     function U.bind(name, prio, fn)
         if U.emu then
-            if name == "NoVR_Control" then RunService:BindToRenderStep(name, prio, function(dt) pcall(U.emuStep, dt) end) end
+            if name == "NoVR_Control" then RunService:BindToRenderStep(name, prio, function(dt) if not U.normal then pcall(U.emuStep, dt) end end) end
             return
         end
-        RunService:BindToRenderStep(name, prio, fn)
+        RunService:BindToRenderStep(name, prio, function(dt) if U.normal then return end fn(dt) end)
     end
     local cam = workspace.CurrentCamera
 
@@ -1401,6 +1406,170 @@ task.spawn(function()
     setScale(10)
 
     cam.HeadLocked = not U.emu
+
+    -- ===== Normal Avatar mode: walk as your regular Roblox avatar, switch back to the VR rig any time (no rejoin) =====
+    -- While on: the game is told the real (non-VR) answers, this script stops driving the camera / hands, the camera goes back to your character,
+    -- the VR rig is hidden on your screen and your avatar is shown on your screen.
+    U.avSaved = {}
+    U.avOff = {}
+    local function avHide(root)   -- everything of the VR rig is hidden on YOUR screen: parts, laser beams, trails, particles, lights
+        for _, d in ipairs(root:GetDescendants()) do
+            if d:IsA("BasePart") then
+                if d.LocalTransparencyModifier ~= 1 then d.LocalTransparencyModifier = 1 end
+            elseif d:IsA("Beam") or d:IsA("Trail") or d:IsA("ParticleEmitter") or d:IsA("Highlight") or d:IsA("Light") or d:IsA("Fire") or d:IsA("Smoke") or d:IsA("Sparkles") then
+                if d.Enabled then
+                    if U.avOff[d] == nil then U.avOff[d] = true end
+                    d.Enabled = false
+                end
+            elseif d:IsA("BillboardGui") or d:IsA("SurfaceGui") then
+                if d.Enabled then
+                    if U.avOff[d] == nil then U.avOff[d] = true end
+                    d.Enabled = false
+                end
+            end
+        end
+    end
+    local function avNudge()
+        pcall(function()
+            local gc = (getgenv and getgenv().getconnections) or _G.getconnections
+            if gc then
+                for _, sig in ipairs({ VRService:GetPropertyChangedSignal("VREnabled"), UIS:GetPropertyChangedSignal("VREnabled") }) do
+                    for _, con in ipairs(gc(sig)) do pcall(function() con:Fire() end) end
+                end
+            end
+        end)
+    end
+    local function avApply()
+        local ch = lp.Character
+        if ch then
+            for _, d in ipairs(ch:GetDescendants()) do
+                if d:IsA("BasePart") and d.Name ~= "HumanoidRootPart" and d.Transparency >= 0.99 then
+                    if U.avSaved[d] == nil then U.avSaved[d] = d.Transparency end
+                    d.Transparency = 0
+                end
+            end
+            local hm = ch:FindFirstChildOfClass("Humanoid")
+            if hm then
+                if cam.CameraSubject ~= hm then cam.CameraSubject = hm end
+                hm.AutoRotate = true
+            end
+        end
+        local r = vrPlayers and vrPlayers:FindFirstChild(uid)
+        if r then avHide(r) end
+        -- laser pointers / rays the game keeps beside the rig or on the camera
+        for _, holder in ipairs({ cam, workspace }) do
+            for _, d in ipairs(holder:GetChildren()) do
+                local nm = string.lower(d.Name)
+                local kind = string.find(nm, "laser", 1, true) or string.find(nm, "pointer", 1, true) or string.find(nm, "beam", 1, true)
+                -- on the camera any such thing is ours; in the workspace only if its name carries your id / name
+                local mine = holder == cam or string.find(nm, uid, 1, true) or string.find(nm, string.lower(lp.Name), 1, true)
+                if kind and mine and (d:IsA("BasePart") or d:IsA("Beam") or d:IsA("Model") or d:IsA("Folder")) and not d:FindFirstChildOfClass("Humanoid") then
+                    if d:IsA("Beam") then
+                        if d.Enabled then U.avOff[d] = true; d.Enabled = false end
+                    elseif d:IsA("BasePart") then
+                        d.LocalTransparencyModifier = 1
+                    else
+                        avHide(d)
+                    end
+                end
+            end
+        end
+    end
+    function U.setAvatar(on)
+        on = on and true or false
+        if on == (U.normal == true) then return end
+        U.normal = on
+        pcall(function()
+            game:GetService("StarterGui"):SetCore("SendNotification", { Title = on and "Normal avatar" or "VR rig", Text = on and "Walk around as your regular avatar. F7 or the menu switches back." or "Back on the VR rig.", Duration = 3 })
+        end)
+        if on then
+            -- the real character can be parked somewhere else while you play as the VR rig: bring it to where your VR head is, standing on the ground
+            pcall(function()
+                local ch = lp.Character
+                local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+                local rg = vrPlayers and vrPlayers:FindFirstChild(uid)
+                local head = rg and rg:FindFirstChild("VRHead")
+                if hrp and head then
+                    local pos = head:GetPivot().Position
+                    local params = RaycastParams.new()
+                    params.FilterType = Enum.RaycastFilterType.Exclude
+                    params.FilterDescendantsInstances = { ch, vrPlayers }
+                    local hit = workspace:Raycast(pos, Vector3.new(0, -300, 0), params)
+                    local target = hit and (hit.Position + Vector3.new(0, 3.4, 0)) or pos
+                    local look = cam.CFrame.LookVector
+                    ch:PivotTo(CFrame.new(target, target + Vector3.new(look.X, 0, look.Z) + Vector3.new(0, 0, 0.001)))
+                    hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                end
+            end)
+            -- a small report (NoVR_avatar_diag.txt) of where everything is, in case something still looks wrong
+            pcall(function()
+                local L = {}
+                local ch = lp.Character
+                local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+                local rg = vrPlayers and vrPlayers:FindFirstChild(uid)
+                local head = rg and rg:FindFirstChild("VRHead")
+                L[#L + 1] = "character: " .. (hrp and tostring(hrp.Position) or "none") .. "  anchored=" .. tostring(hrp and hrp.Anchored)
+                L[#L + 1] = "vr head:   " .. (head and tostring(head:GetPivot().Position) or "none")
+                L[#L + 1] = "camera:    " .. tostring(cam.CFrame.Position) .. "  type=" .. tostring(cam.CameraType) .. "  subject=" .. tostring(cam.CameraSubject)
+                local n = 0
+                for _, d in ipairs(workspace:GetDescendants()) do
+                    if (d:IsA("Highlight") or d:IsA("Beam") or d:IsA("SelectionBox") or d:IsA("Trail")) and d.Enabled ~= false then
+                        n = n + 1
+                        if n <= 25 then L[#L + 1] = d.ClassName .. ": " .. d:GetFullName() end
+                    end
+                    if n > 400 then break end
+                end
+                L[#L + 1] = "enabled highlight/beam/trail objects: " .. n
+                if writefile then writefile("NoVR_avatar_diag.txt", table.concat(L, "\n")) end
+            end)
+            U.avPrevHL = cam.HeadLocked
+            cam.HeadLocked = false
+            pcall(function() cam.CameraType = Enum.CameraType.Custom end)
+            pcall(function() UIS.MouseBehavior = Enum.MouseBehavior.Default end)
+            avNudge()
+            pcall(function()   -- the "Mouse = Look Around | WASD = Fly" hint isn't true any more
+                local hud = lp.PlayerGui:FindFirstChild("NoVR_HUD")
+                if hud then U.avHud = hud.Enabled; hud.Enabled = false end
+            end)
+            task.spawn(function()
+                while U.normal do
+                    pcall(avApply)
+                    task.wait(0.4)
+                end
+            end)
+        else
+            for part, tr in pairs(U.avSaved) do
+                if part.Parent then pcall(function() part.Transparency = tr end) end
+            end
+            U.avSaved = {}
+            for d in pairs(U.avOff) do
+                if d.Parent then pcall(function() d.Enabled = true end) end
+            end
+            U.avOff = {}
+            pcall(function()
+                local hud = lp.PlayerGui:FindFirstChild("NoVR_HUD")
+                if hud and U.avHud ~= nil then hud.Enabled = U.avHud end
+            end)
+            local r = vrPlayers and vrPlayers:FindFirstChild(uid)
+            if r then
+                for _, d in ipairs(r:GetDescendants()) do
+                    if d:IsA("BasePart") and d.LocalTransparencyModifier == 1 then d.LocalTransparencyModifier = 0 end
+                end
+            end
+            for _, holder in ipairs({ cam, workspace }) do
+                for _, d in ipairs(holder:GetChildren()) do
+                    if d:IsA("BasePart") and d.LocalTransparencyModifier == 1 then d.LocalTransparencyModifier = 0 end
+                end
+            end
+            if U.avPrevHL ~= nil then cam.HeadLocked = U.avPrevHL else cam.HeadLocked = not U.emu end
+            if U.setCamMode and U.camMode then pcall(U.setCamMode, U.camMode) end
+            avNudge()
+        end
+    end
+    UIS.InputBegan:Connect(function(io, gp)
+        if gp or UIS:GetFocusedTextBox() then return end
+        if io.KeyCode == Enum.KeyCode.F7 then U.setAvatar(not U.normal) end
+    end)
     local yaw, pitch
     do
         local lv = cam.CFrame.LookVector
@@ -3085,6 +3254,7 @@ task.spawn(function()
         gui.Name = "NoVR_Crosshair"
         gui.ResetOnSpawn = false
         gui.IgnoreGuiInset = true
+        pcall(function() gui.ScreenInsets = Enum.ScreenInsets.None end)
         gui.DisplayOrder = 40
         gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
         gui.Parent = pg
@@ -3297,6 +3467,7 @@ task.spawn(function()
                 gui.Name = "NoVR_Mobile"
                 gui.ResetOnSpawn = false
                 gui.IgnoreGuiInset = true
+                pcall(function() gui.ScreenInsets = Enum.ScreenInsets.None end)
                 gui.DisplayOrder = 50
                 gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
                 gui.Enabled = false   -- closed until the M circle is pressed
@@ -4129,6 +4300,7 @@ task.spawn(function()
                 tg.Name = "NoVR_MobileToggle"
                 tg.ResetOnSpawn = false
                 tg.IgnoreGuiInset = true
+                pcall(function() tg.ScreenInsets = Enum.ScreenInsets.None end)
                 tg.DisplayOrder = 60
                 tg.Enabled = false   -- no corner buttons; use the menu / the compact bar instead
                 tg.Parent = pg
@@ -4242,6 +4414,7 @@ task.spawn(function()
         gui.Name = "NoVR_HUD"
         gui.ResetOnSpawn = false
         gui.IgnoreGuiInset = true
+        pcall(function() gui.ScreenInsets = Enum.ScreenInsets.None end)
         gui.Parent = lp:WaitForChild("PlayerGui")
 
         local lbl = Instance.new("TextLabel", gui)
@@ -5045,6 +5218,7 @@ task.spawn(function()
             tg.Name = "NoVR_UpdateToast"
             tg.ResetOnSpawn = false
             tg.IgnoreGuiInset = true
+            pcall(function() tg.ScreenInsets = Enum.ScreenInsets.None end)
             tg.DisplayOrder = 250   -- above the welcome / loading screens
             tg.Parent = pg
 
@@ -5434,6 +5608,7 @@ task.spawn(function()
             g.Name = "NoVR_Start"
             g.ResetOnSpawn = false
             g.IgnoreGuiInset = true
+            pcall(function() g.ScreenInsets = Enum.ScreenInsets.None end)
             g.DisplayOrder = 100
             g.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
             g.Parent = lp:WaitForChild("PlayerGui")
@@ -5699,6 +5874,33 @@ task.spawn(function()
                 local ent = { p = p, s = ps, x = x, y = y }
                 me.panels[#me.panels + 1] = ent
                 if name == "Dock" or name == "Panel" or name == "Side" then p.Visible = false; sh.Visible = false; halo.Visible = false; glow.Visible = false; ent.noShadow = true end
+                -- windows overlap like normal windows: the one you touch comes to the front (with its shadow)
+                local function front()
+                    me.zTop = (me.zTop or 10) + 3
+                    p.ZIndex = me.zTop
+                    sh.ZIndex = me.zTop - 2
+                    halo.ZIndex = me.zTop - 2
+                    glow.ZIndex = me.zTop - 1
+                end
+                ent.front = front
+                if not ent.noShadow then front() end
+                if not me.zHooked then
+                    me.zHooked = true
+                    UIS.InputBegan:Connect(function(io)
+                        if not isPress(io) then return end
+                        local pos = sp(io)
+                        local best
+                        for _, e in ipairs(me.panels) do
+                            if e.front and e.p and e.p.Parent and e.p.Visible and not e.closed and not e.noShadow then
+                                local ap, as = e.p.AbsolutePosition, e.p.AbsoluteSize
+                                if pos.X >= ap.X and pos.X <= ap.X + as.X and pos.Y >= ap.Y and pos.Y <= ap.Y + as.Y then
+                                    if not best or e.p.ZIndex > best.p.ZIndex then best = e end
+                                end
+                            end
+                        end
+                        if best and best.p.ZIndex < (me.zTop or 0) then best.front() end
+                    end)
+                end
                 ent.cw, ent.ch, ent.homeX, ent.homeY, ent.accent = w, h, x, y, accent
                 local ssc = Instance.new("UIScale"); ssc.Parent = sh
                 local hsc = Instance.new("UIScale"); hsc.Parent = halo
@@ -5724,9 +5926,12 @@ task.spawn(function()
                     local ax = ap.X + (nx - ent.x) * kf
                     local ay = ap.Y + (ny - ent.y) * kf
                     -- like the Mois7 window: fully on screen, and never under Roblox's top bar
-                    local top = 0   -- the whole screen, top edge included
-                    local cx = math.clamp(ax, 0, math.max(0, v.X - as.X))
-                    local cy = math.clamp(ay, top, math.max(top, v.Y - as.Y))
+                    -- bounds come from the gui this panel lives in, so the limit is the real screen edge on every side
+                    local root = p:FindFirstAncestorWhichIsA("LayerCollector")
+                    local rp = root and root.AbsolutePosition or Vector2.new(0, 0)
+                    local rs = (root and root.AbsoluteSize.X > 0 and root.AbsoluteSize.Y > 0) and root.AbsoluteSize or v
+                    local cx = math.clamp(ax, rp.X, math.max(rp.X, rp.X + rs.X - as.X))
+                    local cy = math.clamp(ay, rp.Y, math.max(rp.Y, rp.Y + rs.Y - as.Y))
                     return nx + (cx - ax) / kf, ny + (cy - ay) / kf
                 end
                 ent.clampXY = clampXY
@@ -6004,12 +6209,15 @@ task.spawn(function()
             -- generic overlay: panel + title + close button. Calling it again
             -- while it is open closes it (toggle).
             local function overlay(slot, x, y, w, h, name, title)
-                for _, other in ipairs({ "controls", "settings", "crosshair", "teleport", "profile", "servers", "roblox", "search", "gesture", "emu", "people", "accounts", "chat", "owner", "live" }) do
+                local cascade = 0
+                for _, other in ipairs({ "controls", "settings", "crosshair", "teleport", "profile", "servers", "roblox", "search", "gesture", "emu", "people", "accounts", "chat", "owner", "live", "req", "mic" }) do
                     if other ~= slot and me[other] and not me[other].closed then
-                        me[other].close(); me[other] = nil
+                        cascade = cascade + 1   -- windows stay open side by side: each new one is offset a little
                     end
                 end
                 if me[slot] and not me[slot].closed then me[slot].close(); me[slot] = nil; return nil end
+                x = x + 28 * math.min(cascade, 6)
+                y = y + 24 * math.min(cascade, 6)
                 local defW, defH = w, h
                 local fixed = false
                 local minW, minH = math.max(340, math.floor(defW * 0.75)), math.max(300, math.floor(defH * 0.75))
@@ -12057,7 +12265,8 @@ task.spawn(function()
 
             -- ===== LIVE USERS window: who is running the script now; join them / (owner) bring them =====
             local function openLive()
-                local p, ent = overlay("live", 70, 14, 440, 500, "Live users", "Live script users")
+                local ownerUI = Chat.iAmOwner()   -- the owner gets a taller window with a manage strip
+                local p, ent = overlay("live", 70, 14, 440, ownerUI and 590 or 500, "Live users", "Live script users")
                 if not p then return end
                 Chat.liveOpen = true
                 local list, render
@@ -12153,6 +12362,88 @@ task.spawn(function()
                 sw(8, "Show me in this list", "Other script users see your name and game. Nothing else.", function() return S.live.vis end, function(v) S.live.vis = v end)
                 sw(46, "Allow invites from the owner", "You always get a prompt and choose whether to join.", function() return S.live.inv end, function(v) S.live.inv = v end)
 
+                -- owner: pick a person in the list, then message / mute / unmute / rejoin them
+                local selected
+                local refreshManage = function() end
+                if ownerUI then
+                    local mg = Instance.new("Frame")
+                    mg.AnchorPoint = Vector2.new(0, 1)
+                    mg.Position = UDim2.new(0, 12, 1, -112)
+                    mg.Size = UDim2.new(1, -24, 0, 100)
+                    mg.BackgroundColor3 = Color3.new(1, 1, 1)
+                    mg.BackgroundTransparency = 0.93
+                    mg.BorderSizePixel = 0
+                    mg.Parent = p
+                    corner(mg, 14)
+                    local ml = lbl(mg, "", 14, 8, 380, 16, 11, WHITE, Enum.Font.GothamBold)
+                    local tb = Instance.new("TextBox")
+                    tb.Position = UDim2.fromOffset(12, 30)
+                    tb.Size = UDim2.new(1, -112, 0, 28)
+                    tb.BackgroundColor3 = Color3.new(1, 1, 1)
+                    tb.BackgroundTransparency = 0.9
+                    tb.BorderSizePixel = 0
+                    tb.ClearTextOnFocus = false
+                    tb.Text = ""
+                    tb.PlaceholderText = "Private message to this person"
+                    tb.PlaceholderColor3 = MUTED
+                    tb.TextColor3 = WHITE
+                    tb.Font = Enum.Font.GothamMedium
+                    tb.TextSize = 11
+                    tb.TextXAlignment = Enum.TextXAlignment.Left
+                    tb.ZIndex = 5
+                    tb.Parent = mg
+                    corner(tb, 10)
+                    local pad = Instance.new("UIPadding")
+                    pad.PaddingLeft = UDim.new(0, 10)
+                    pad.Parent = tb
+                    local function pill(x, w, text, primary, fn)
+                        local b = Instance.new("TextButton")
+                        b.Position = UDim2.new(x >= 0 and 0 or 1, x, 0, 0)
+                        b.Size = UDim2.fromOffset(w, 28)
+                        b.AutoButtonColor = false
+                        b.BorderSizePixel = 0
+                        b.Text = text
+                        b.Font = Enum.Font.GothamBold
+                        b.TextSize = 10
+                        b.TextColor3 = WHITE
+                        b.ZIndex = 5
+                        b.Parent = mg
+                        corner(b, 10)
+                        if primary then
+                            b.BackgroundColor3 = C(118, 24, 255)
+                            b:SetAttribute("tc", true)
+                        else
+                            b.BackgroundColor3 = WHITE
+                            b.BackgroundTransparency = 0.88
+                        end
+                        b.Activated:Connect(fn)
+                        return b
+                    end
+                    local sb = pill(-92, 80, "SEND", true, function()
+                        if not selected then say("Pick a person first.", true) return end
+                        if tb.Text == "" then say("Type a message first.", true) return end
+                        local ok, tx = Chat.command(selected.u, "msg", tb.Text)
+                        say(ok and ("Message sent to " .. selected.d .. ".") or tx, not ok)
+                        if ok then tb.Text = "" end
+                    end)
+                    sb.Position = UDim2.new(1, -92, 0, 30)
+                    local row2 = { { "MUTE CHAT", "mute", "muted in script chat" }, { "UNMUTE", "unmute", "can chat again" }, { "REJOIN", "rejoin", "is rejoining" } }
+                    for i, r in ipairs(row2) do
+                        local bw = 124
+                        local b = pill(12 + (i - 1) * (bw + 8), bw, r[1], false, function()
+                            if not selected then say("Pick a person first.", true) return end
+                            local ok, tx = Chat.command(selected.u, r[2], nil)
+                            say(ok and (selected.d .. " " .. r[3] .. ".") or tx, not ok)
+                            render()
+                        end)
+                        b.Position = UDim2.fromOffset(12 + (i - 1) * (bw + 8), 66)
+                    end
+                    refreshManage = function()
+                        ml.Text = selected and ("Managing  " .. selected.d) or "Tap a person in the list to manage them"
+                    end
+                    refreshManage()
+                end
+
                 render = function()
                     if not list.Parent then return end
                     for _, c in ipairs(list:GetChildren()) do
@@ -12179,6 +12470,17 @@ task.spawn(function()
                         f.BorderSizePixel = 0
                         f.Parent = list
                         corner(f, 12)
+                        if ownerUI and not e.me then
+                            local pick = Instance.new("TextButton")   -- tap the row to select this person
+                            pick.Size = UDim2.fromOffset(rowW, 54)
+                            pick.BackgroundTransparency = 1
+                            pick.AutoButtonColor = false
+                            pick.Text = ""
+                            pick.ZIndex = 2
+                            pick.Parent = f
+                            pick.Activated:Connect(function() selected = { u = e.u, d = e.d }; render() end)
+                        end
+                        if selected and selected.u == e.u then f.BackgroundTransparency = 0.8 end
                         local dot = Instance.new("Frame")   -- online dot
                         dot.Position = UDim2.fromOffset(12, 14)
                         dot.Size = UDim2.fromOffset(8, 8)
@@ -12193,7 +12495,7 @@ task.spawn(function()
                             lbl(f, string.upper(role), 28 + math.min(#nm.Text * 6.8, rowW - 260) + 8, 10, 70, 12, 8, PINK, Enum.Font.GothamBlack):SetAttribute("tc", true)
                         end
                         local same = e.j ~= nil and e.j == game.JobId
-                        local where = (e.g ~= "" and e.g or "In a game") .. (same and "  |  this server" or "")
+                        local where = (Chat.mutedByMe[e.u] and "MUTED  |  " or "") .. (e.g ~= "" and e.g or "In a game") .. (same and "  |  this server" or "")
                         lbl(f, "@" .. e.n .. "  |  " .. where, 28, 28, rowW - 190, 14, 10, MUTED, Enum.Font.GothamMedium)
                         if e.me and e.hidden then lbl(f, "hidden from others", 28, 40, rowW - 190, 12, 9, MUTED, Enum.Font.GothamMedium) end
                         local bx = rowW - 10
@@ -12243,6 +12545,7 @@ task.spawn(function()
                     countL.Text = #entries .. " script user" .. (#entries == 1 and "" or "s") .. " online"
                     if os.clock() - Chat.liveSince < 30 then stateL.Text = "Scanning... people answer within a few seconds."; stateL.TextColor3 = MUTED end
                     list.CanvasSize = UDim2.fromOffset(0, y + 4)
+                    refreshManage()
                 end
                 ent.onResize = function() render() end
                 local lf = function() render() end
@@ -12258,6 +12561,333 @@ task.spawn(function()
                 Theme.recolor(p)
             end
             S.ovl.live = openLive
+
+            -- ===== MIC window: level, presets and auto-level for your voice input (piano) - buttons only, no keybinds =====
+            local Mic = { gain = 1, auto = false, touched = false }
+            pcall(function()
+                if isfile and isfile("NoVR_Mic.json") then
+                    local d = game:GetService("HttpService"):JSONDecode(readfile("NoVR_Mic.json"))
+                    if type(d.gain) == "number" then Mic.gain = math.clamp(d.gain, 0, 3) end
+                    if type(d.auto) == "boolean" then Mic.auto = d.auto end
+                    Mic.touched = d.touched == true
+                end
+            end)
+            local function micSave()
+                pcall(function() if writefile then writefile("NoVR_Mic.json", game:GetService("HttpService"):JSONEncode({ gain = Mic.gain, auto = Mic.auto, touched = Mic.touched })) end end)
+            end
+            function Mic.find()
+                if Mic.input and Mic.input.Parent then return Mic.input end
+                Mic.input = lp:FindFirstChildOfClass("AudioDeviceInput")
+                if not Mic.input then
+                    for _, d in ipairs(lp:GetDescendants()) do
+                        if d:IsA("AudioDeviceInput") then Mic.input = d break end
+                    end
+                end
+                return Mic.input
+            end
+            function Mic.apply()
+                local m = Mic.find()
+                if m then pcall(function() m.Volume = Mic.gain end) end
+                return m ~= nil
+            end
+            function Mic.meter()   -- a level meter fed from your mic (peak / rms)
+                local m = Mic.find()
+                if not m then return nil end
+                if not (Mic.analyzer and Mic.analyzer.Parent) then
+                    pcall(function()
+                        local an = Instance.new("AudioAnalyzer")
+                        an.Name = "NoVR_MicMeter"
+                        an.Parent = lp
+                        local w = Instance.new("Wire")
+                        w.SourceInstance = m
+                        w.TargetInstance = an
+                        w.Parent = an
+                        Mic.analyzer = an
+                    end)
+                end
+                return Mic.analyzer
+            end
+            task.spawn(function()   -- keeps your level applied, and does the auto-level when it is on
+                while true do
+                    task.wait(0.1)
+                    if Mic.auto or Mic.touched then
+                        local m = Mic.find()
+                        if m then
+                            if math.abs(m.Volume - Mic.gain) > 0.01 then pcall(function() m.Volume = Mic.gain end) end
+                        end
+                    end
+                end
+            end)
+            -- compressor on the mic volume (same maths as piano_compressor.py): loud notes down, soft notes and fading tails up, no lift for hiss
+            do
+                local THR, RATIO, LIFT_BELOW, LIFT_RATIO, MAXB, FLOOR, MAKEUP = -18, 3, -26, 3, 18, -52, 3
+                local env, gdb = 1e-5, 0
+                game:GetService("RunService").Heartbeat:Connect(function(dt)
+                    if not Mic.auto then env, gdb = 1e-5, 0 return end
+                    local m = Mic.find()
+                    local an = m and Mic.meter()
+                    if not an then return end
+                    dt = math.min(dt, 0.05)
+                    local raw = an.PeakLevel / math.max(m.Volume, 0.05)   -- level before our own gain, so it can't feed back on itself
+                    local atk, rel = math.exp(-dt / 0.008), math.exp(-dt / 0.35)
+                    env = raw + (env - raw) * (raw > env and atk or rel)
+                    local ldb = 20 * math.log10(math.max(env, 1e-6))
+                    local tgt = 0
+                    if ldb > THR then
+                        tgt = -(ldb - THR) * (1 - 1 / RATIO)
+                    elseif ldb < LIFT_BELOW and ldb > FLOOR then
+                        tgt = math.min((LIFT_BELOW - ldb) * (1 - 1 / LIFT_RATIO), MAXB) * math.min(1, (ldb - FLOOR) / 6)
+                    end
+                    gdb = tgt + (gdb - tgt) * (tgt < gdb and atk or rel)
+                    Mic.gain = math.clamp(10 ^ ((gdb + MAKEUP) / 20), 0.1, 8)
+                    pcall(function() m.Volume = Mic.gain end)
+                end)
+            end
+            local function openMic()
+                local p, ent = overlay("mic", 70, 14, 400, 440, "Mic", "Mic & piano")
+                if not p then return end
+                local statL = lbl(p, "", 22, 52, 356, 14, 10, MUTED, Enum.Font.GothamMedium)
+                lbl(p, "Level", 22, 78, 120, 16, 12, WHITE, Enum.Font.GothamBold)
+                local valL = lbl(p, "", 258, 78, 120, 16, 12, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Right)
+                local _, thumb = hslider(p, 22, 112, 356, Mic.gain / 3, false, function(f, done)
+                    Mic.gain = math.floor(f * 3 / 0.05 + 0.5) * 0.05
+                    Mic.touched = true
+                    Mic.apply()
+                    if done then micSave() end
+                end)
+                lbl(p, "Mic meter", 22, 146, 200, 14, 10, MUTED, Enum.Font.GothamMedium)
+                local mtr = Instance.new("Frame")
+                mtr.Position = UDim2.fromOffset(22, 166)
+                mtr.Size = UDim2.fromOffset(356, 10)
+                mtr.BackgroundColor3 = Color3.new(1, 1, 1)
+                mtr.BackgroundTransparency = 0.88
+                mtr.BorderSizePixel = 0
+                mtr.Parent = p
+                corner(mtr, 5)
+                local fill = Instance.new("Frame")
+                fill.Size = UDim2.fromScale(0, 1)
+                fill.BackgroundColor3 = GREEN
+                fill.BorderSizePixel = 0
+                fill.Parent = mtr
+                corner(fill, 5)
+                local function pill(x, y, w, text, fn)
+                    local b = Instance.new("TextButton")
+                    b.Position = UDim2.fromOffset(x, y)
+                    b.Size = UDim2.fromOffset(w, 32)
+                    b.AutoButtonColor = false
+                    b.BackgroundColor3 = Color3.new(1, 1, 1)
+                    b.BackgroundTransparency = 0.88
+                    b.BorderSizePixel = 0
+                    b.Text = text
+                    b.Font = Enum.Font.GothamBold
+                    b.TextSize = 10
+                    b.TextColor3 = WHITE
+                    b.ZIndex = 5
+                    b.Parent = p
+                    corner(b, 11)
+                    b.Activated:Connect(fn)
+                    return b
+                end
+                local function setGain(g)
+                    Mic.gain = g
+                    Mic.touched = true
+                    Mic.apply()
+                    micSave()
+                    thumb.Position = UDim2.new(math.clamp(g / 3, 0, 1), 0, 0.5, 0)
+                end
+                lbl(p, "Presets", 22, 192, 200, 14, 10, MUTED, Enum.Font.GothamMedium)
+                pill(22, 212, 112, "NORMAL  x1.0", function() setGain(1) end)
+                pill(144, 212, 112, "PIANO  x1.8", function() setGain(1.8) end)
+                pill(266, 212, 112, "LOUD  x2.5", function() setGain(2.5) end)
+                local muteB
+                muteB = pill(22, 254, 170, "", function()
+                    local m = Mic.find()
+                    if m then pcall(function() m.Muted = not m.Muted end) end
+                end)
+                -- auto-level switch
+                local box = Instance.new("Frame")
+                box.Position = UDim2.fromOffset(12, 300)
+                box.Size = UDim2.fromOffset(376, 58)
+                box.BackgroundColor3 = Color3.new(1, 1, 1)
+                box.BackgroundTransparency = 0.93
+                box.BorderSizePixel = 0
+                box.Parent = p
+                corner(box, 14)
+                lbl(box, "Compressor", 14, 10, 220, 16, 12, WHITE, Enum.Font.GothamBold)
+                lbl(box, "Loud notes down, soft notes and tails up.", 14, 30, 260, 14, 9, MUTED, Enum.Font.GothamMedium)
+                local trk = Instance.new("TextButton")
+                trk.AnchorPoint = Vector2.new(1, 0.5)
+                trk.Position = UDim2.new(1, -14, 0.5, 0)
+                trk.Size = UDim2.fromOffset(46, 24)
+                trk.AutoButtonColor = false
+                trk.Text = ""
+                trk.BorderSizePixel = 0
+                trk.ZIndex = 5
+                trk.Parent = box
+                corner(trk, 12)
+                local kn = Instance.new("Frame")
+                kn.AnchorPoint = Vector2.new(0, 0.5)
+                kn.Size = UDim2.fromOffset(18, 18)
+                kn.BackgroundColor3 = WHITE
+                kn.BorderSizePixel = 0
+                kn.ZIndex = 6
+                kn.Active = false
+                kn.Parent = trk
+                corner(kn, 9)
+                trk:SetAttribute("tc", true)
+                local function paint(anim)
+                    local col = Mic.auto and Theme.tint(C(124, 40, 255)) or C(70, 55, 105)
+                    local pos = Mic.auto and UDim2.new(1, -21, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
+                    if anim then
+                        tw(trk, 0.22, { BackgroundColor3 = col }, Enum.EasingStyle.Sine)
+                        tw(kn, 0.22, { Position = pos }, Enum.EasingStyle.Back)
+                    else
+                        trk.BackgroundColor3 = col
+                        kn.Position = pos
+                    end
+                end
+                paint(false)
+                trk.Activated:Connect(function() Mic.auto = not Mic.auto; Mic.touched = true; micSave(); paint(true) end)
+                local info = lbl(p, "The compressor works on your mic volume: loud notes are pulled down, soft notes and fading tails are lifted. It only works in games that give you a mic control, and only if the game sends your voice after that volume. Ask a friend if they hear a difference. If not, use the virtual cable program (piano_compressor.py).", 22, 372, 356, 58, 9, MUTED, Enum.Font.GothamMedium)
+                info.TextWrapped = true
+                info.TextTruncate = Enum.TextTruncate.None
+                info.TextYAlignment = Enum.TextYAlignment.Top
+                -- live readout
+                task.spawn(function()
+                    while p.Parent and not ent.closed do
+                        local m = Mic.find()
+                        if m then
+                            statL.Text = "Mic control found" .. (m.Muted and "  |  muted" or "")
+                            statL.TextColor3 = MUTED
+                            muteB.Text = m.Muted and "UNMUTE MIC" or "MUTE MIC"
+                            local an = Mic.meter()
+                            if an then fill.Size = UDim2.fromScale(math.clamp(an.PeakLevel * 1.4, 0, 1), 1) end
+                        else
+                            statL.Text = "No mic control in this game that the script can reach."
+                            statL.TextColor3 = C(255, 140, 150)
+                            muteB.Text = "MUTE MIC"
+                            fill.Size = UDim2.fromScale(0, 1)
+                        end
+                        statL:SetAttribute("tc", not m)
+                        valL.Text = "x" .. string.format("%.2f", Mic.gain)
+                        task.wait(0.08)
+                    end
+                end)
+                Theme.recolor(p)
+            end
+            S.ovl.mic = openMic
+
+            -- ===== REQUIREMENTS window: what your executor has to allow for each feature to show and work =====
+            local function reqChecks()
+                local function has(...)
+                    for _, n in ipairs({ ... }) do
+                        local ok, v = pcall(function()
+                            local e = (getgenv and getgenv()) or _G
+                            local cur = e
+                            for part in string.gmatch(n, "[^%.]+") do cur = cur and cur[part] end
+                            return cur
+                        end)
+                        if ok and type(v) == "function" then return true end
+                    end
+                    return false
+                end
+                local coreOk = pcall(function() return #game:GetService("CoreGui"):GetChildren() end)
+                return {
+                    { "Web requests", "Needed: script chat, Live Users, announcements, status and updates.", has("request", "http_request", "syn.request", "http.request", "fluxus.request"), true },
+                    { "File read / write", "Needed: saved settings, owner token, check mark image.", has("writefile") and has("readfile") and has("isfile"), true },
+                    { "CoreGui access", "Needed: verified check on the leaderboard, player menu and VR name tag. Allow it if your executor asks.", coreOk, true },
+                    { "Custom assets", "Needed: your exact check mark image. Without it a drawn check is used.", has("getcustomasset", "getsynasset"), false },
+                    { "Queue on teleport", "Needed: the script comes back after the owner brings you or you join someone.", has("queue_on_teleport", "syn.queue_on_teleport", "fluxus.queue_on_teleport"), true },
+                    { "Hidden UI parent", "Optional: keeps the menus out of the game's reach.", has("gethui"), false },
+                    { "Hidden properties", "Optional: some VR hand and camera tweaks.", has("sethiddenproperty"), false },
+                }
+            end
+            local function reqMissing()
+                local n = 0
+                for _, c in ipairs(reqChecks()) do
+                    if not c[3] and c[4] then n = n + 1 end
+                end
+                return n
+            end
+            local function openReq()
+                local p, ent = overlay("req", 70, 14, 440, 470, "Requirements", "Executor requirements")
+                if not p then return end
+                local sumL = lbl(p, "", 20, 52, 400, 16, 11, WHITE, Enum.Font.GothamBold)
+                local subL = lbl(p, "Things your executor must allow for the script to show and work.", 20, 70, 400, 14, 10, MUTED, Enum.Font.GothamMedium)
+                local list = Instance.new("ScrollingFrame")
+                list.Position = UDim2.fromOffset(12, 94)
+                list.Size = UDim2.fromOffset(416, 330)
+                list.BackgroundTransparency = 1
+                list.BorderSizePixel = 0
+                list.ScrollBarThickness = 3
+                list.ScrollBarImageColor3 = PINK
+                list.ScrollingDirection = Enum.ScrollingDirection.Y
+                list.CanvasSize = UDim2.fromOffset(0, 0)
+                list.ClipsDescendants = true
+                list.Parent = p
+                ent.stretchAdd(list, 1, 1)
+                local cb = Instance.new("TextButton")
+                cb.AnchorPoint = Vector2.new(0, 1)
+                cb.Position = UDim2.new(0, 12, 1, -12)
+                cb.Size = UDim2.new(1, -24, 0, 34)
+                cb.AutoButtonColor = false
+                cb.BackgroundColor3 = Color3.new(1, 1, 1)
+                cb.BackgroundTransparency = 0.9
+                cb.BorderSizePixel = 0
+                cb.Font = Enum.Font.GothamBold
+                cb.TextSize = 10
+                cb.TextColor3 = WHITE
+                cb.ZIndex = 5
+                cb.Parent = p
+                corner(cb, 12)
+                local function paintCb()
+                    cb.Text = (Chat.coreWanted and "Check marks in Roblox menus: ON" or "Check marks in Roblox menus: OFF") .. "  (tap to switch, restart to apply)"
+                end
+                paintCb()
+                cb.Activated:Connect(function() Chat.setCore(not Chat.coreWanted); paintCb() end)
+                local render
+                render = function()
+                    for _, c in ipairs(list:GetChildren()) do
+                        if c:IsA("GuiObject") then c:Destroy() end
+                    end
+                    local rowW = math.max(ent.w - 24 - 8, 260)
+                    local y, bad = 0, 0
+                    for _, c in ipairs(reqChecks()) do
+                        local ok = c[3]
+                        if not ok and c[4] then bad = bad + 1 end
+                        local f = Instance.new("Frame")
+                        f.Position = UDim2.fromOffset(0, y)
+                        f.Size = UDim2.fromOffset(rowW, 62)
+                        f.BackgroundColor3 = Color3.new(1, 1, 1)
+                        f.BackgroundTransparency = 0.93
+                        f.BorderSizePixel = 0
+                        f.Parent = list
+                        corner(f, 12)
+                        local dot = Instance.new("Frame")
+                        dot.Position = UDim2.fromOffset(12, 14)
+                        dot.Size = UDim2.fromOffset(8, 8)
+                        dot.BackgroundColor3 = ok and GREEN or (c[4] and C(255, 110, 125) or C(255, 200, 90))
+                        dot.BorderSizePixel = 0
+                        dot:SetAttribute("tc", true)
+                        dot.Parent = f
+                        corner(dot, 4)
+                        lbl(f, c[1], 28, 8, rowW - 130, 16, 12, WHITE, Enum.Font.GothamBold)
+                        local d = lbl(f, c[2], 28, 26, rowW - 44, 30, 9, MUTED, Enum.Font.GothamMedium)
+                        d.TextWrapped = true
+                        d.TextTruncate = Enum.TextTruncate.None
+                        d.TextYAlignment = Enum.TextYAlignment.Top
+                        local st = lbl(f, ok and "ALLOWED" or (c[4] and "MISSING" or "OPTIONAL"), rowW - 106, 8, 94, 16, 9, ok and GREEN or (c[4] and C(255, 140, 150) or C(255, 200, 90)), Enum.Font.GothamBlack, Enum.TextXAlignment.Right)
+                        st:SetAttribute("tc", true)
+                        y = y + 68
+                    end
+                    sumL.Text = bad == 0 and "Everything required is allowed." or (bad .. " required thing" .. (bad == 1 and " is" or "s are") .. " missing")
+                    list.CanvasSize = UDim2.fromOffset(0, y + 4)
+                end
+                ent.onResize = function() render() end
+                render()
+                Theme.recolor(p)
+            end
+            S.ovl.req = openReq
 
             -- ===== OWNER window: announcements to everyone running the script =====
             local function openOwner()
@@ -12451,6 +13081,33 @@ task.spawn(function()
                       fn = function() hudApi.setAuto(not S.pop.auto) end })
                 add({ name = "Better AntiVCB", sec = "Quick", sub = "Extra anti-VC-ban loader", get = onoff(function() return Opt.avcb end), fn = optFlip("avcb") })
                 -- MENUS: every page
+                add({ name = "Normal Avatar", sec = "Quick", sub = "Walk as your normal avatar (F7)", get = onoff(function() return U.normal == true end),
+                      fn = function() if U.setAvatar then U.setAvatar(not U.normal) end end })
+                add({ name = "Arrange Windows", sec = "Quick", sub = "Tidy every open window so none overlap", badge = "RUN", fn = function()
+                    local v = cam.ViewportSize
+                    local kf = math.max(fit.Scale, 0.01)
+                    local cx, cy, rowH = 12, 12, 0
+                    for _, e in ipairs(me.panels) do
+                        if e.p and e.p.Parent and e.p.Visible and not e.closed and not e.noShadow and e.moveTo then
+                            local aw, ah = e.p.AbsoluteSize.X, e.p.AbsoluteSize.Y
+                            if cx + aw > v.X - 8 and cx > 12 then cx = 12; cy = cy + rowH + 12; rowH = 0 end
+                            local ap = e.p.AbsolutePosition
+                            e.moveTo(e.x + (cx - ap.X) / kf, e.y + (cy - ap.Y) / kf)
+                            if e.front then e.front() end
+                            if e.clampXY then
+                                local nx, ny = e.clampXY(e.x, e.y)
+                                e.moveTo(nx, ny)
+                            end
+                            cx = cx + aw + 12
+                            rowH = math.max(rowH, ah)
+                        end
+                    end
+                end })
+                add({ name = "Close Windows", sec = "Quick", sub = "Close every open window except this menu", badge = "RUN", fn = function()
+                    for _, e in ipairs(me.panels) do
+                        if e ~= palEnt and e.close and not e.closed and not e.noShadow then pcall(e.close) end
+                    end
+                end })
                 local function page(name, sub, fn) add({ name = name, sec = "Menus", sub = sub, badge = "OPEN", fn = fn }) end
                 page("Settings", "Colours, size, saved options", openSettings)
                 page("Controls", "Every key and button", openControls)
@@ -12470,8 +13127,10 @@ task.spawn(function()
                 end
                 page("Accounts", "Your account list + PIN", function() if U.openAccounts then U.openAccounts() end end)
                 page("My Profile", "Your Roblox profile", openProfile)
-                add({ name = "Live Users", sec = "Menus", sub = "Who is online, join them, owner can bring them", badge = "OPEN", fn = openLive })
-                add({ name = "Chat", sec = "Menus", sub = "Talk with other script users", fn = openChat,
+                add({ name = "Mic & Piano", sec = "Menus", sub = "Mic level, presets, auto-level", badge = "OPEN", fn = openMic })
+                add({ name = "Requirements", sec = "Menus", sub = "What your executor must allow", badge = reqMissing() > 0 and (reqMissing() .. " MISSING") or "ALL OK", fn = openReq })
+                add({ name = "Live Users", sec = "Social", sub = "Who is online, join them, owner can bring them", badge = "OPEN", fn = openLive })
+                add({ name = "Chat", sec = "Social", sub = "Talk with other script users", fn = openChat,
                       get = function() local n = hudApi.Chat.unread return (n > 0) and tostring(n) or "OPEN", n > 0 end })
                 -- CONTROLS: the cheat sheet (opens the full list)
                 for _, r in ipairs(rowsData) do
@@ -12593,7 +13252,7 @@ task.spawn(function()
                 list.ClipsDescendants = true
                 list.Parent = body
 
-                local PCHIPS = { "All", "Starred", "Quick", "Menus", "Controls" }
+                local PCHIPS = { "All", "Starred", "Quick", "Menus", "Social", "Controls" }
                 local sel, q = "All", ""
                 local chipRef, stateRef = {}, {}
                 local build
@@ -12642,7 +13301,17 @@ task.spawn(function()
                     stateRef = {}
                     local y, shown, last = 0, 0, nil
                     local ql = string.lower(q)
-                    for _, it in ipairs(items) do
+                    -- sections always come out grouped in one fixed order, whatever order the rows were added in
+                    local RANK = { Quick = 1, Menus = 2, Social = 3, Controls = 4 }
+                    local order = {}
+                    for i, itm in ipairs(items) do order[#order + 1] = { itm, i } end
+                    table.sort(order, function(a, b)
+                        local ra, rb = RANK[a[1].sec] or 9, RANK[b[1].sec] or 9
+                        if ra ~= rb then return ra < rb end
+                        return a[2] < b[2]
+                    end)
+                    for _, pair in ipairs(order) do
+                        local it = pair[1]
                         local okC = sel == "All" or (sel == "Starred" and S.favs[it.name]) or sel == it.sec
                         local okQ = ql == "" or string.find(string.lower(it.name .. " " .. (it.sub or "") .. " " .. (it.tags or "") .. " " .. it.sec), ql, 1, true)
                         if okC and okQ then
@@ -12742,7 +13411,7 @@ task.spawn(function()
                 fetchRole(function(t)   -- the Announce row only exists for the owner
                     if not hasOwnerRow and string.lower(tostring(t)) == "owner" then
                         hasOwnerRow = true
-                        add({ name = "Announce", sec = "Menus", sub = "Pop-up for everyone using the script", badge = "OWNER", fn = openOwner })
+                        add({ name = "Announce", sec = "Social", sub = "Pop-up for everyone using the script", badge = "OWNER", fn = openOwner })
                         if body.Parent then build(false) end
                     end
                 end)
@@ -13259,6 +13928,7 @@ task.spawn(function()
             g.Name = "NoVR_Loader"
             g.ResetOnSpawn = false
             g.IgnoreGuiInset = true
+            pcall(function() g.ScreenInsets = Enum.ScreenInsets.None end)
             g.DisplayOrder = 200
             g.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
             g.Parent = lp:WaitForChild("PlayerGui")
@@ -13620,6 +14290,7 @@ task.spawn(function()
             g.Name = "NoVR_Gate"
             g.ResetOnSpawn = false
             g.IgnoreGuiInset = true
+            pcall(function() g.ScreenInsets = Enum.ScreenInsets.None end)
             g.DisplayOrder = 199   -- just under the loading screen (200)
             g.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
             g.Parent = pg0
@@ -14198,6 +14869,20 @@ task.spawn(function()
             local ok = postTopic({ k = "i", v = 1, u = lp.UserId, n = lp.Name, d = lp.DisplayName, to = uid, pid = game.PlaceId, j = game.JobId, g = Chat.gameName or "", ts = os.time() })
             return ok, ok and "Sent. They get a 6 second countdown, then they are brought." or "Could not send the invite."
         end
+        local function gdel(n) pcall(function() local df = (getgenv and getgenv().delfile) or _G.delfile; if df then df(n) end end) end
+        Chat.ownerMuted = false
+        pcall(function() Chat.ownerMuted = (isfile and isfile("NoVR_muted.flag")) == true end)
+        Chat.mutedByMe = {}
+        function Chat.command(uid, cmd, text)
+            if not Chat.iAmOwner() then return false, "Only the owner can manage people." end
+            if os.clock() - Chat.lastInvite < 2 then return false, "Wait a moment." end
+            Chat.lastInvite = os.clock()
+            local rec = { k = "c", v = 1, u = lp.UserId, to = uid, cmd = cmd, text = text and cleanText(text, 300) or nil, ts = os.time() }
+            local ok = postTopic(rec)
+            if ok and cmd == "mute" then Chat.mutedByMe[uid] = true end
+            if ok and cmd == "unmute" then Chat.mutedByMe[uid] = nil end
+            return ok, ok and "Sent." or "Could not send."
+        end
         function Chat.dispatch(m)
             if type(m) ~= "table" then return end
             if m.k == nil then addMsg(m) return end
@@ -14210,6 +14895,24 @@ task.spawn(function()
                     Chat.live[m.u] = { u = m.u, n = cleanText(m.n, 24), d = cleanText(m.d ~= nil and m.d or m.n, 32), pid = tonumber(m.pid), g = cleanText(m.g or "", 40),
                                        j = (type(m.j) == "string" and #m.j > 10 and #m.j < 60) and m.j or nil, seen = os.time() }
                     for _, f in ipairs(Chat.liveListeners) do pcall(f) end
+                end
+            elseif m.k == "c" then
+                -- owner commands: only ever obeyed when the sender is the owner in roles.json, and only the ones listed here
+                if age <= 90 and m.to == lp.UserId and m.u ~= lp.UserId and type(m.cmd) == "string" then
+                    pcall(Chat.loadRoles)
+                    if isOwnerId(m.u) then
+                        if m.cmd == "msg" and type(m.text) == "string" and m.text ~= "" then
+                            hudApi.announce({ id = 0, title = "MESSAGE FROM THE OWNER", message = cleanText(m.text, 300), secs = 12 })
+                        elseif m.cmd == "mute" then
+                            Chat.ownerMuted = true
+                            pcall(function() if writefile then writefile("NoVR_muted.flag", "1") end end)
+                        elseif m.cmd == "unmute" then
+                            Chat.ownerMuted = false
+                            gdel("NoVR_muted.flag")
+                        elseif m.cmd == "rejoin" and game.PrivateServerId == "" then
+                            task.spawn(function() Chat.hop(game.PlaceId, game.JobId) end)
+                        end
+                    end
                 end
             elseif m.k == "i" then
                 if age <= 120 and m.to == lp.UserId and type(m.pid) == "number" and type(m.j) == "string" and #m.j > 10 and #m.j < 60 then
@@ -14241,6 +14944,7 @@ task.spawn(function()
         function Chat.send(text)
             text = cleanText(text, 180)
             if text == "" then return false, "Type something first." end
+            if Chat.ownerMuted then return false, "The owner muted you in script chat." end
             if os.clock() - Chat.lastSend < 2 then return false, "Slow down a little." end
             local rec = { v = 1, u = lp.UserId, n = lp.Name, d = lp.DisplayName, t = text, ts = os.time(), j = game.JobId }
             local r = anyReq({ Url = CHAT_HOST .. CHAT_TOPIC, Method = "POST", Headers = { ["Content-Type"] = "text/plain" }, Body = HttpSvcC:JSONEncode(rec) })
@@ -14272,6 +14976,7 @@ task.spawn(function()
             pgui.Name = "NoVR_Announce"
             pgui.ResetOnSpawn = false
             pgui.IgnoreGuiInset = true
+            pcall(function() pgui.ScreenInsets = Enum.ScreenInsets.None end)
             pgui.DisplayOrder = 500
             pgui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
             pgui.Parent = lp:WaitForChild("PlayerGui")
@@ -14397,6 +15102,7 @@ task.spawn(function()
             pgui.Name = "NoVR_Invite"
             pgui.ResetOnSpawn = false
             pgui.IgnoreGuiInset = true
+            pcall(function() pgui.ScreenInsets = Enum.ScreenInsets.None end)
             pgui.DisplayOrder = 450
             pgui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
             pgui.Parent = lp:WaitForChild("PlayerGui")
@@ -14577,16 +15283,232 @@ task.spawn(function()
         function Chat.start()
             if Chat.started then return end
             Chat.started = true
+            -- ----- owner badge on Roblox's own name labels (leaderboard, player menu, VR name tag), event driven so opening the leaderboard stays fast -----
+            -- crash guard: touching Roblox's own (CoreGui) menus can crash the client on some executors. If the last run didn't survive 60 seconds,
+            -- the CoreGui part stays off until you switch it back on in the Requirements window.
+            local function fexists(n) local ok, v = pcall(function() return isfile and isfile(n) end) return ok and v == true end
+            local function fwrite(n) pcall(function() if writefile then writefile(n, "1") end end) end
+            local function fdel(n) pcall(function() local df = (getgenv and getgenv().delfile) or _G.delfile; if df then df(n) end end) end
+            if fexists("NoVR_coreguard.flag") then fwrite("NoVR_coreoff.flag"); fdel("NoVR_coreguard.flag") end
+            Chat.coreOff = fexists("NoVR_coreoff.flag")
+            if not Chat.coreOff then
+                fwrite("NoVR_coreguard.flag")
+                task.delay(60, function() fdel("NoVR_coreguard.flag") end)
+            end
+            function Chat.setCore(on)
+                if on then fdel("NoVR_coreoff.flag") else fwrite("NoVR_coreoff.flag") end
+                Chat.coreWanted = on
+            end
+            Chat.coreWanted = not Chat.coreOff
+            Chat.badgeNames, Chat.badgeSig = {}, ""
+            Chat.badgeWatched = setmetatable({}, { __mode = "k" })
+            Chat.badgeHooked = setmetatable({}, { __mode = "k" })
+            local CHECK_B64 = "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"
+            local function b64dec(s)
+                local A = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+                local map = {}
+                for i = 1, 64 do map[string.sub(A, i, i)] = i - 1 end
+                local out, n = {}, 0
+                local acc, bits = 0, 0
+                for c in string.gmatch(s, "[%w%+/]") do
+                    acc = acc * 64 + map[c]
+                    bits = bits + 6
+                    if bits >= 8 then
+                        bits = bits - 8
+                        local v = math.floor(acc / 2 ^ bits)
+                        acc = acc - v * 2 ^ bits
+                        n = n + 1
+                        out[n] = string.char(v)
+                    end
+                end
+                return table.concat(out)
+            end
+            local badgeImage
+            local function getBadgeImage()
+                if badgeImage ~= nil then return badgeImage or nil end
+                badgeImage = false
+                pcall(function()
+                    local gca = getcustomasset or getsynasset
+                    if writefile and gca then
+                        local fn = "NoVR_check.png"
+                        if not (isfile and isfile(fn)) then writefile(fn, b64dec(CHECK_B64)) end
+                        badgeImage = gca(fn)
+                    end
+                end)
+                return badgeImage or nil
+            end
+            local function makeBadge(parent)
+                local img = getBadgeImage()
+                local b
+                if img then
+                    b = Instance.new("ImageLabel")
+                    b.BackgroundTransparency = 1
+                    b.Image = img
+                    b.Size = UDim2.fromOffset(18, 18)
+                    b.ZIndex = 100
+                else
+                    b = Instance.new("Frame")   -- fallback when this executor can't load images: tilted blue tile with a white check
+                    b.BackgroundTransparency = 1
+                    b.Size = UDim2.fromOffset(18, 18)
+                    b.Rotation = 15
+                    b.ZIndex = 100
+                    local function part(x, y, w, h, rot, col, r)
+                        local f = Instance.new("Frame")
+                        f.AnchorPoint = Vector2.new(0.5, 0.5)
+                        f.Position = UDim2.fromOffset(x, y)
+                        f.Size = UDim2.fromOffset(w, h)
+                        f.Rotation = rot
+                        f.BackgroundColor3 = col
+                        f.BorderSizePixel = 0
+                        f.ZIndex = 100
+                        local c = Instance.new("UICorner")
+                        c.CornerRadius = UDim.new(0, r)
+                        c.Parent = f
+                        f.Parent = b
+                    end
+                    part(9, 9, 18, 18, 0, Color3.fromRGB(0, 98, 255), 2)
+                    part(5.9, 10.9, 5.4, 2.6, 45, Color3.new(1, 1, 1), 2)
+                    part(10.8, 9.2, 10.2, 2.6, -45, Color3.new(1, 1, 1), 2)
+                end
+                b.Name = "NoVR_Badge"
+                b.Active = false
+                b:SetAttribute("tc", true)
+                for _, c in ipairs(b:GetDescendants()) do c:SetAttribute("tc", true) end
+                b.Parent = parent
+                return b
+            end
+            Chat.badgeOf = setmetatable({}, { __mode = "k" })
+            function Chat.badgeTag(d)
+                local txt = string.gsub(string.gsub(d.Text, VERIFIED, ""), "^%s*(.-)%s*$", "%1")
+                local b = Chat.badgeOf[d]
+                if b and not b.Parent then b = nil; Chat.badgeOf[d] = nil end
+                if not Chat.badgeNames[txt] then
+                    if b then b:Destroy(); Chat.badgeOf[d] = nil end
+                    return
+                end
+                -- the badge lives on the top-level gui (not inside the name label), so the game's own layout (voice icon, list layouts) is never disturbed
+                local root = d:FindFirstAncestorWhichIsA("LayerCollector")
+                if not root then return end
+                if not b then
+                    b = makeBadge(root)
+                    Chat.badgeOf[d] = b
+                    for _, prop in ipairs({ "AbsoluteSize", "AbsolutePosition", "TextBounds", "Visible" }) do
+                        d:GetPropertyChangedSignal(prop):Connect(function() pcall(Chat.badgeTag, d) end)
+                    end
+                    d.Destroying:Connect(function() if b then b:Destroy() end end)
+                    d.AncestryChanged:Connect(function() pcall(Chat.badgeTag, d) end)
+                end
+                local w, h = d.AbsoluteSize.X, d.AbsoluteSize.Y
+                local tb = d.TextBounds
+                local shown = d.Visible and w >= 1 and h >= 1 and tb.X >= 1 and d:IsDescendantOf(root)
+                local p = d.Parent
+                while shown and p and p ~= root do
+                    if p:IsA("GuiObject") and not p.Visible then shown = false end
+                    p = p.Parent
+                end
+                b.Visible = shown
+                if not shown then return end
+                local sz = math.max(8, math.min(tb.Y * 0.8, h))
+                local x
+                if d.TextXAlignment == Enum.TextXAlignment.Center then x = (w + tb.X) / 2 + 4
+                elseif d.TextXAlignment == Enum.TextXAlignment.Right then x = w + 4
+                else x = tb.X + 4 end
+                local ox = d.AbsolutePosition.X - root.AbsolutePosition.X
+                local oy = d.AbsolutePosition.Y - root.AbsolutePosition.Y
+                b.Size = UDim2.fromOffset(sz, sz)
+                b.AnchorPoint = Vector2.new(0, 0.5)
+                b.Position = UDim2.fromOffset(ox + x, oy + h / 2)
+                if not b:IsA("ImageLabel") then
+                    local us = b:FindFirstChildOfClass("UIScale")
+                    if not us then us = Instance.new("UIScale") us.Parent = b end
+                    us.Scale = sz / 18
+                    b.Size = UDim2.fromOffset(18, 18)
+                end
+            end
+            local function badgeWatch(d)
+                if (d:IsA("TextLabel") or d:IsA("TextButton")) and not Chat.badgeWatched[d] then
+                    Chat.badgeWatched[d] = true
+                    pcall(Chat.badgeTag, d)
+                    d:GetPropertyChangedSignal("Text"):Connect(function() pcall(Chat.badgeTag, d) end)
+                end
+            end
+            task.spawn(function()
+                if Chat.coreOff then return end
+                local roots = {}
+                local okc, cg = pcall(game.GetService, game, "CoreGui")
+                if okc and cg then roots[#roots + 1] = cg end
+                for _, root in ipairs(roots) do
+                    root.DescendantAdded:Connect(function(d) task.defer(badgeWatch, d) end)
+                    local ok, ds = pcall(root.GetDescendants, root)
+                    if ok then
+                        for k, d in ipairs(ds) do
+                            badgeWatch(d)
+                            if k % 250 == 0 then task.wait() end   -- spread the first pass out so nothing hitches
+                        end
+                    end
+                end
+            end)
+            -- safety net: menus Roblox builds without announcing (Esc menu "In this server" list, Tab list) get re-checked in small slices,
+            -- quickly while the Esc menu is open and slowly otherwise, so nothing hitches
+            task.spawn(function()
+                if Chat.coreOff then return end
+                local GS = game:GetService("GuiService")
+                local okc, cg = pcall(game.GetService, game, "CoreGui")
+                if not (okc and cg) then return end
+                while true do
+                    task.wait(GS.MenuIsOpen and 1.5 or 8)
+                    if next(Chat.badgeNames) then
+                        local ok, ds = pcall(cg.GetDescendants, cg)
+                        if ok then
+                            for k, d in ipairs(ds) do
+                                if (d:IsA("TextLabel") or d:IsA("TextButton")) then
+                                    if not Chat.badgeWatched[d] then badgeWatch(d) else pcall(Chat.badgeTag, d) end
+                                end
+                                if k % 200 == 0 then task.wait() end
+                            end
+                        end
+                    end
+                end
+            end)
             task.spawn(function()   -- verified checkmark next to the owner's name in the game, shown only on screens running the script
                 local PS = game:GetService("Players")
                 while task.wait(3) do
                     pcall(Chat.loadRoles)
+                    -- name tags that live in the world (above the head / VR name tag) sit inside the character or the camera: watch those too
                     for _, pl in ipairs(PS:GetPlayers()) do
                         if isOwnerId(pl.UserId) then
                             local ch = pl.Character
-                            local hm = ch and ch:FindFirstChildOfClass("Humanoid")
-                            if hm and hm.DisplayName ~= pl.DisplayName .. VERIFIED then pcall(function() hm.DisplayName = pl.DisplayName .. VERIFIED end) end
+                            if ch and not Chat.badgeHooked[ch] then
+                                Chat.badgeHooked[ch] = true
+                                pcall(function()
+                                    ch.DescendantAdded:Connect(function(d) task.defer(badgeWatch, d) end)
+                                    for _, d in ipairs(ch:GetDescendants()) do badgeWatch(d) end
+                                end)
+                            end
                         end
+                    end
+                    local cam = workspace.CurrentCamera
+                    if cam and not Chat.badgeHooked[cam] then
+                        Chat.badgeHooked[cam] = true
+                        pcall(function()
+                            cam.DescendantAdded:Connect(function(d) task.defer(badgeWatch, d) end)
+                            for _, d in ipairs(cam:GetDescendants()) do badgeWatch(d) end
+                        end)
+                    end
+                    local names, sig = {}, ""
+                    for _, pl in ipairs(PS:GetPlayers()) do
+                        if isOwnerId(pl.UserId) then
+                            names[pl.DisplayName] = true
+                            names[pl.Name] = true
+                            names["@" .. pl.Name] = true
+                            names["(@" .. pl.Name .. ")"] = true
+                            sig = sig .. pl.Name .. pl.DisplayName
+                        end
+                    end
+                    if sig ~= Chat.badgeSig then   -- only when who-is-owner changes: re-check the labels we already know
+                        Chat.badgeSig = sig
+                        Chat.badgeNames = names
+                        for d in pairs(Chat.badgeWatched) do pcall(Chat.badgeTag, d) end
                     end
                 end
             end)
@@ -14616,6 +15538,67 @@ task.spawn(function()
             end)
         end
         task.spawn(Chat.start)
+
+        -- ===== click feel for every button in our menus: soft hover light, a press flash and a springy squash on centred buttons =====
+        task.spawn(function()
+            local pg = lp:WaitForChild("PlayerGui")
+            local SKIP = { NoVR_Announce = true, NoVR_Boot = true, NoVR_Loader = true, NoVR_Gate = true, NoVR_Blur = true }
+            local function hook(b)
+                if not b:IsA("GuiButton") or b:GetAttribute("NoVR_fx") then return end
+                local sg = b:FindFirstAncestorWhichIsA("ScreenGui")
+                if not sg or string.sub(sg.Name, 1, 5) ~= "NoVR_" or SKIP[sg.Name] then return end
+                b:SetAttribute("NoVR_fx", true)
+                local fx, us
+                local down, hover = false, false
+                local function ensure()
+                    if fx and fx.Parent then return true end
+                    if b.AbsoluteSize.X > 620 or b.AbsoluteSize.X < 8 then return false end
+                    fx = Instance.new("Frame")
+                    fx.Name = "NoVR_FX"
+                    fx.Size = UDim2.fromScale(1, 1)
+                    fx.BackgroundColor3 = Color3.new(1, 1, 1)
+                    fx.BackgroundTransparency = 1
+                    fx.BorderSizePixel = 0
+                    fx.Active = false
+                    fx.ZIndex = b.ZIndex + 1
+                    fx:SetAttribute("tc", true)
+                    local cc = b:FindFirstChildOfClass("UICorner")
+                    if cc then
+                        local c2 = Instance.new("UICorner")
+                        c2.CornerRadius = cc.CornerRadius
+                        c2.Parent = fx
+                    end
+                    fx.Parent = b
+                    if b.AnchorPoint == Vector2.new(0.5, 0.5) and not b:FindFirstChildOfClass("UIScale") and b.AbsoluteSize.X < 320 then
+                        us = Instance.new("UIScale")
+                        us.Name = "NoVR_Press"
+                        us.Parent = b
+                    end
+                    return true
+                end
+                local function show(tr, t, style)
+                    if not ensure() then return end
+                    tw(fx, t, { BackgroundTransparency = tr }, style or Enum.EasingStyle.Quad)
+                end
+                local function isP(io) return io.UserInputType == Enum.UserInputType.MouseButton1 or io.UserInputType == Enum.UserInputType.Touch end
+                b.MouseEnter:Connect(function() hover = true; if not down then show(0.93, 0.15) end end)
+                b.MouseLeave:Connect(function() hover = false; if not down then show(1, 0.2) end end)
+                b.InputBegan:Connect(function(io)
+                    if not isP(io) then return end
+                    down = true
+                    show(0.8, 0.07)
+                    if us then tw(us, 0.08, { Scale = 0.93 }, Enum.EasingStyle.Quad) end
+                end)
+                b.InputEnded:Connect(function(io)
+                    if not isP(io) then return end
+                    down = false
+                    show(hover and 0.93 or 1, 0.3, Enum.EasingStyle.Sine)
+                    if us then tw(us, 0.4, { Scale = 1 }, Enum.EasingStyle.Back) end
+                end)
+            end
+            for _, d in ipairs(pg:GetDescendants()) do pcall(hook, d) end
+            pg.DescendantAdded:Connect(function(d) task.defer(function() pcall(hook, d) end) end)
+        end)
         hudApi.Chat = Chat
 
         -- ============ START-UP POP-UPS + AUTO EXECUTE ============
@@ -14650,6 +15633,7 @@ task.spawn(function()
             pgui.Name = "NoVR_Popups"
             pgui.ResetOnSpawn = false
             pgui.IgnoreGuiInset = true
+            pcall(function() pgui.ScreenInsets = Enum.ScreenInsets.None end)
             pgui.DisplayOrder = 103
             pgui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
             pgui.Parent = lp:WaitForChild("PlayerGui")
@@ -14878,6 +15862,7 @@ task.spawn(function()
             gui.Name = "NoVR_Bar"
             gui.ResetOnSpawn = false
             gui.IgnoreGuiInset = true
+            pcall(function() gui.ScreenInsets = Enum.ScreenInsets.None end)
             gui.DisplayOrder = 102   -- above the Start menu (100), under the welcome / loading screens
             gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
             gui.Parent = pg
@@ -15214,6 +16199,7 @@ task.spawn(function()
             tg.Name = "NoVR_StartToggle"
             tg.ResetOnSpawn = false
             tg.IgnoreGuiInset = true
+            pcall(function() tg.ScreenInsets = Enum.ScreenInsets.None end)
             tg.DisplayOrder = 101
             tg.Enabled = false   -- the compact bar (M button) replaces this round button
             tg.Parent = lp:WaitForChild("PlayerGui")
