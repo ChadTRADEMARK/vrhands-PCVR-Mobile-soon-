@@ -12452,7 +12452,7 @@ task.spawn(function()
                     local entries = {}
                     local now = os.time()
                     for _, e in pairs(Chat.live) do
-                        if now - e.seen < 150 then entries[#entries + 1] = e end
+                        if now - e.seen < 900 then entries[#entries + 1] = e end
                     end
                     table.sort(entries, function(a, b) return string.lower(a.d) < string.lower(b.d) end)
                     local me = Chat.presence()   -- you, first in the list
@@ -12543,7 +12543,14 @@ task.spawn(function()
                         y = y + 60
                     end
                     countL.Text = #entries .. " script user" .. (#entries == 1 and "" or "s") .. " online"
-                    if os.clock() - Chat.liveSince < 30 then stateL.Text = "Scanning... people answer within a few seconds."; stateL.TextColor3 = MUTED end
+                    local dg = Chat.dbg
+                    local relay = (dg.ok > 0 and os.clock() - dg.at < 40) and ("relay ok " .. math.floor(os.clock() - dg.at) .. "s ago") or ("relay problem: " .. tostring(dg.code))
+                    if os.clock() - Chat.liveSince < 30 then
+                        stateL.Text = "Scanning...  " .. relay .. "  |  replies: " .. dg.p
+                    else
+                        stateL.Text = relay .. "  |  asked by others: " .. dg.q .. "  |  replies seen: " .. dg.p
+                    end
+                    stateL.TextColor3 = MUTED
                     list.CanvasSize = UDim2.fromOffset(0, y + 4)
                     refreshManage()
                 end
@@ -12589,6 +12596,40 @@ task.spawn(function()
                 local m = Mic.find()
                 if m then pcall(function() m.Volume = Mic.gain end) end
                 return m ~= nil
+            end
+            function Mic.setMonitor(on)   -- hear your own mic through your speakers / headphones (local only, nobody else hears this)
+                if on then
+                    local m = Mic.find()
+                    if not m then return false end
+                    if not (Mic.mon and Mic.mon.Parent) then
+                        local ok = pcall(function()
+                            local f = Instance.new("AudioFader")
+                            f.Name = "NoVR_MonFader"
+                            f.Volume = 1
+                            f.Parent = lp
+                            local o = Instance.new("AudioDeviceOutput")
+                            o.Name = "NoVR_MonOut"
+                            o.Parent = lp
+                            local w1 = Instance.new("Wire")
+                            w1.SourceInstance = m
+                            w1.TargetInstance = f
+                            w1.Parent = f
+                            local w2 = Instance.new("Wire")
+                            w2.SourceInstance = f
+                            w2.TargetInstance = o
+                            w2.Parent = o
+                            Mic.mon, Mic.monOut = f, o
+                        end)
+                        if not ok then return false end
+                    end
+                    Mic.monitorOn = true
+                else
+                    Mic.monitorOn = false
+                    pcall(function() if Mic.mon then Mic.mon:Destroy() end end)
+                    pcall(function() if Mic.monOut then Mic.monOut:Destroy() end end)
+                    Mic.mon, Mic.monOut = nil, nil
+                end
+                return true
             end
             function Mic.meter()   -- a level meter fed from your mic (peak / rms)
                 local m = Mic.find()
@@ -12644,7 +12685,7 @@ task.spawn(function()
                 end)
             end
             local function openMic()
-                local p, ent = overlay("mic", 70, 14, 400, 440, "Mic", "Mic & piano")
+                local p, ent = overlay("mic", 70, 14, 400, 530, "Mic", "Mic & piano")
                 if not p then return end
                 local statL = lbl(p, "", 22, 52, 356, 14, 10, MUTED, Enum.Font.GothamMedium)
                 lbl(p, "Level", 22, 78, 120, 16, 12, WHITE, Enum.Font.GothamBold)
@@ -12748,7 +12789,60 @@ task.spawn(function()
                 end
                 paint(false)
                 trk.Activated:Connect(function() Mic.auto = not Mic.auto; Mic.touched = true; micSave(); paint(true) end)
-                local info = lbl(p, "The compressor works on your mic volume: loud notes are pulled down, soft notes and fading tails are lifted. It only works in games that give you a mic control, and only if the game sends your voice after that volume. Ask a friend if they hear a difference. If not, use the virtual cable program (piano_compressor.py).", 22, 372, 356, 58, 9, MUTED, Enum.Font.GothamMedium)
+                -- hear myself
+                local box2 = Instance.new("Frame")
+                box2.Position = UDim2.fromOffset(12, 366)
+                box2.Size = UDim2.fromOffset(376, 58)
+                box2.BackgroundColor3 = Color3.new(1, 1, 1)
+                box2.BackgroundTransparency = 0.93
+                box2.BorderSizePixel = 0
+                box2.Parent = p
+                corner(box2, 14)
+                lbl(box2, "Hear myself", 14, 10, 220, 16, 12, WHITE, Enum.Font.GothamBold)
+                local monSub = lbl(box2, "Plays your mic back to you. Use headphones or it echoes.", 14, 30, 290, 14, 9, MUTED, Enum.Font.GothamMedium)
+                local trk2 = Instance.new("TextButton")
+                trk2.AnchorPoint = Vector2.new(1, 0.5)
+                trk2.Position = UDim2.new(1, -14, 0.5, 0)
+                trk2.Size = UDim2.fromOffset(46, 24)
+                trk2.AutoButtonColor = false
+                trk2.Text = ""
+                trk2.BorderSizePixel = 0
+                trk2.ZIndex = 5
+                trk2.Parent = box2
+                corner(trk2, 12)
+                local kn2 = Instance.new("Frame")
+                kn2.AnchorPoint = Vector2.new(0, 0.5)
+                kn2.Size = UDim2.fromOffset(18, 18)
+                kn2.BackgroundColor3 = WHITE
+                kn2.BorderSizePixel = 0
+                kn2.ZIndex = 6
+                kn2.Active = false
+                kn2.Parent = trk2
+                corner(kn2, 9)
+                trk2:SetAttribute("tc", true)
+                local function paint2(anim)
+                    local on = Mic.monitorOn == true
+                    local col = on and Theme.tint(C(124, 40, 255)) or C(70, 55, 105)
+                    local pos = on and UDim2.new(1, -21, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
+                    if anim then
+                        tw(trk2, 0.22, { BackgroundColor3 = col }, Enum.EasingStyle.Sine)
+                        tw(kn2, 0.22, { Position = pos }, Enum.EasingStyle.Back)
+                    else
+                        trk2.BackgroundColor3 = col
+                        kn2.Position = pos
+                    end
+                end
+                paint2(false)
+                trk2.Activated:Connect(function()
+                    local ok = Mic.setMonitor(not Mic.monitorOn)
+                    if not ok then
+                        monSub.Text = "No mic control in this game, so there is nothing to play back."
+                    else
+                        monSub.Text = "Plays your mic back to you. Use headphones or it echoes."
+                    end
+                    paint2(true)
+                end)
+                local info = lbl(p, "The compressor works on your mic volume: loud notes are pulled down, soft notes and fading tails are lifted. It only works in games that give you a mic control, and only if the game sends your voice after that volume. Ask a friend if they hear a difference. If not, use the virtual cable program (piano_compressor.py).", 22, 436, 356, 70, 9, MUTED, Enum.Font.GothamMedium)
                 info.TextWrapped = true
                 info.TextTruncate = Enum.TextTruncate.None
                 info.TextYAlignment = Enum.TextYAlignment.Top
@@ -14846,7 +14940,7 @@ task.spawn(function()
             if not S.live.vis then return end
             if os.clock() - Chat.lastResp < 20 then return end
             Chat.lastResp = os.clock()
-            task.delay(math.random() * 3, function() postTopic(Chat.presence()) end)
+            task.delay(math.random() * 3, function() if postTopic(Chat.presence()) then Chat.dbg.answered = Chat.dbg.answered + 1 end end)
         end
         function Chat.query()
             if os.clock() - Chat.lastQuery < 10 then return false end
@@ -14883,22 +14977,25 @@ task.spawn(function()
             if ok and cmd == "unmute" then Chat.mutedByMe[uid] = nil end
             return ok, ok and "Sent." or "Could not send."
         end
-        function Chat.dispatch(m)
+        Chat.dbg = { polls = 0, ok = 0, code = "-", at = -99, q = 0, answered = 0, p = 0 }
+        function Chat.dispatch(m, fresh)
             if type(m) ~= "table" then return end
             if m.k == nil then addMsg(m) return end
             if type(m.u) ~= "number" or type(m.ts) ~= "number" then return end
             local age = os.time() - m.ts
             if m.k == "q" then
-                if age <= 25 and m.u ~= lp.UserId then Chat.respond() end
+                if fresh and m.u ~= lp.UserId then Chat.dbg.q = Chat.dbg.q + 1; Chat.respond() end   -- 'fresh' = arrived after the first catch-up poll (no clock comparison between PCs)
             elseif m.k == "p" then
-                if age <= 150 and m.u ~= lp.UserId and not Chat.blocked[m.u] then
+                -- accepted when it just arrived, or when it is a recent heartbeat from the catch-up (generous window so PC clock differences don't matter)
+                if (fresh or (age <= 720 and age >= -720)) and m.u ~= lp.UserId and not Chat.blocked[m.u] then
+                    Chat.dbg.p = Chat.dbg.p + 1
                     Chat.live[m.u] = { u = m.u, n = cleanText(m.n, 24), d = cleanText(m.d ~= nil and m.d or m.n, 32), pid = tonumber(m.pid), g = cleanText(m.g or "", 40),
-                                       j = (type(m.j) == "string" and #m.j > 10 and #m.j < 60) and m.j or nil, seen = os.time() }
+                                       j = (type(m.j) == "string" and #m.j > 10 and #m.j < 60) and m.j or nil, seen = os.time() - math.max(0, math.min(age, 600)) }
                     for _, f in ipairs(Chat.liveListeners) do pcall(f) end
                 end
             elseif m.k == "c" then
                 -- owner commands: only ever obeyed when the sender is the owner in roles.json, and only the ones listed here
-                if age <= 90 and m.to == lp.UserId and m.u ~= lp.UserId and type(m.cmd) == "string" then
+                if fresh and math.abs(age) <= 900 and m.to == lp.UserId and m.u ~= lp.UserId and type(m.cmd) == "string" then
                     pcall(Chat.loadRoles)
                     if isOwnerId(m.u) then
                         if m.cmd == "msg" and type(m.text) == "string" and m.text ~= "" then
@@ -14915,7 +15012,7 @@ task.spawn(function()
                     end
                 end
             elseif m.k == "i" then
-                if age <= 120 and m.to == lp.UserId and type(m.pid) == "number" and type(m.j) == "string" and #m.j > 10 and #m.j < 60 then
+                if fresh and math.abs(age) <= 900 and m.to == lp.UserId and type(m.pid) == "number" and type(m.j) == "string" and #m.j > 10 and #m.j < 60 then
                     if S.live.inv and os.clock() - Chat.lastInviteSeen > 30 then
                         pcall(Chat.loadRoles)
                         if isOwnerId(m.u) then   -- only an invite from the owner (role in roles.json) is ever shown
@@ -14928,15 +15025,19 @@ task.spawn(function()
         end
         function Chat.poll()
             local r = anyReq({ Url = CHAT_HOST .. CHAT_TOPIC .. "/json?poll=1&since=" .. (Chat.lastId or "45m"), Method = "GET" })
+            Chat.dbg.polls = Chat.dbg.polls + 1
+            Chat.dbg.at = os.clock()
+            Chat.dbg.code = r and tostring(r.StatusCode) or "no response"
             if not r then return false end
             if r.StatusCode == 429 then return false, true end
             if not okStatus(r) or type(r.Body) ~= "string" then return false end
+            Chat.dbg.ok = Chat.dbg.ok + 1
             for line in string.gmatch(r.Body, "[^\r\n]+") do
                 local ok, ev = pcall(HttpSvcC.JSONDecode, HttpSvcC, line)
                 if ok and type(ev) == "table" and ev.event == "message" and type(ev.message) == "string" then
                     if ev.id then Chat.lastId = ev.id end
                     local ok2, m = pcall(HttpSvcC.JSONDecode, HttpSvcC, ev.message)
-                    if ok2 then Chat.dispatch(m) end
+                    if ok2 then Chat.dispatch(m, Chat.firstDone) end
                 end
             end
             return true
@@ -15283,6 +15384,13 @@ task.spawn(function()
         function Chat.start()
             if Chat.started then return end
             Chat.started = true
+            task.spawn(function()   -- heartbeat: tell the list you are here now and every 8 minutes, so nobody has to ask (only if "Show me" is on)
+                task.wait(6)
+                while true do
+                    if S.live.vis then pcall(function() postTopic(Chat.presence()) end) end
+                    task.wait(480)
+                end
+            end)
             -- ----- owner badge on Roblox's own name labels (leaderboard, player menu, VR name tag), event driven so opening the leaderboard stays fast -----
             -- crash guard: touching Roblox's own (CoreGui) menus can crash the client on some executors. If the last run didn't survive 60 seconds,
             -- the CoreGui part stays off until you switch it back on in the Requirements window.
