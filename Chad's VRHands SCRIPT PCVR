@@ -50,7 +50,7 @@ local UPDATE_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR
 --   2.0.4 -> 2.0.5 ... 2.0.12 -> 2.1.0 ... 2.1.12 -> 2.2.0 ... 2.12.12 -> 3.0.0
 -- Your Discord/status feed ("version" in status.json) should use the same pattern, and the script
 -- compares versions as NUMBERS (so 2.0.12 is newer than 2.0.4, and 2.1.0 is newer than 2.0.12).
-local SCRIPT_VERSION = "2.1.1"
+local SCRIPT_VERSION = "2.1.2"
 -- Optional: RAW link to a small JSON file YOU host. It feeds the Banwave / Key system / Script rows.
 -- Leave "" to skip. Example file:
 --   { "banwave": "clear", "banwave_note": "No wave reported",
@@ -579,6 +579,7 @@ function U.start(lp, S)   -- S = the main script's settings table when the full 
     U.stat = U.stat or {}
     U.cfg = cfg
     U.handYaw = 0
+    U.ab = { L = { y = 0, p = 0 }, R = { y = 0, p = 0 } }   -- extra hand turn used only by the aimbot in the VR Hands game
     U.camNext = { free = "first", first = "pov", pov = "smooth", smooth = "own", own = "game", game = "free" }
     local smL, smR
     U.mult = 1.3   -- studs per hand unit in emulator mode
@@ -840,7 +841,10 @@ function U.start(lp, S)   -- S = the main script's settings table when the full 
             return CFrame.Angles(0, U.handYaw or 0, 0) * CFrame.new(pos * U.mult) * r
         end
         local o = off[side]
-        return CFrame.new((Vector3.new(sgn * cfg.spread + o.X, cfg.height + o.Y, -(cfg.reach + reachAdd))) * cfg.scale)
+        local hp = CFrame.new((Vector3.new(sgn * cfg.spread + o.X, cfg.height + o.Y, -(cfg.reach + reachAdd))) * cfg.scale)
+        local ab = U.ab and U.ab[side]
+        if ab and (ab.y ~= 0 or ab.p ~= 0) then hp = hp * CFrame.fromEulerAnglesYXZ(ab.p, ab.y, 0) end
+        return hp
     end
     -- the camera is set in its own render step that runs LAST, after the game's camera scripts, so nothing overwrites it
     -- (two scripts setting the camera in the same frame is what makes the view jitter)
@@ -1480,7 +1484,7 @@ task.spawn(function()
         if on == (U.normal == true) then return end
         U.normal = on
         pcall(function()
-            game:GetService("StarterGui"):SetCore("SendNotification", { Title = on and "Normal avatar" or "VR rig", Text = on and "Walk around as your regular avatar. F7 or the menu switches back." or "Back on the VR rig.", Duration = 3 })
+            local _quiet = true
         end)
         if on then
             -- the real character can be parked somewhere else while you play as the VR rig: bring it to where your VR head is, standing on the ground
@@ -1566,10 +1570,6 @@ task.spawn(function()
             avNudge()
         end
     end
-    UIS.InputBegan:Connect(function(io, gp)
-        if gp or UIS:GetFocusedTextBox() then return end
-        if io.KeyCode == Enum.KeyCode.F7 then U.setAvatar(not U.normal) end
-    end)
     local yaw, pitch
     do
         local lv = cam.CFrame.LookVector
@@ -2585,6 +2585,1099 @@ task.spawn(function()
         end)
     end
 
+    -- ===== SPECTATE: watch another player (first person, from behind or from the front) =====
+    S.spec = nil
+    local PlayersS = game:GetService("Players")
+    function S.specRig(pl)
+        return vrPlayers and (vrPlayers:FindFirstChild(tostring(pl.UserId)) or vrPlayers:FindFirstChild(pl.Name)) or nil
+    end
+    function S.specKind(pl)   -- "VR" (has a VR rig in this game), "PC" / "Mobile" (other script users report it), otherwise "Other"
+        local rg = S.specRig(pl)
+        if rg and rg:FindFirstChild("VRHead") and not (U.emu and pl == lp) then return "VR" end
+        local pf = S.platOf and S.platOf(pl.UserId)
+        return pf or "Other"
+    end
+    function S.specUnhide(sp)
+        if sp and sp.hid then
+            for _, bp in ipairs(sp.hid) do pcall(function() bp.LocalTransparencyModifier = 0 end) end
+            sp.hid, sp.hidHead = nil, nil
+        end
+    end
+    function S.specHead(pl)
+        local rg = S.specRig(pl)
+        local head = rg and rg:FindFirstChild("VRHead")
+        if not head then
+            local ch = pl.Character
+            head = ch and (ch:FindFirstChild("Head") or ch:FindFirstChild("HumanoidRootPart"))
+        end
+        if head and not head:IsA("BasePart") then   -- the VR head is a model: use one of its parts
+            head = (head:IsA("Model") and head.PrimaryPart) or head:FindFirstChildWhichIsA("BasePart", true)
+        end
+        return head
+    end
+    function S.specStop()
+        if S.spec then
+            S.specUnhide(S.spec)
+            S.spec = nil
+            pcall(function() game:GetService("StarterGui"):SetCore("SendNotification", { Title = "Spectate", Text = "Back to your own view.", Duration = 2 }) end)
+        end
+    end
+    -- TALK while spectating: your real character slips into the one you watch (same spot, no collision), so the server treats you as standing
+    -- right there and they hear you; your camera and ears are already on them. Goes back to where you were when you stop.
+    S.specTalk = true
+    function S.specBodyOn()
+        if S.specBodyConn then return end
+        S.specBodyConn = RunService.Heartbeat:Connect(function()
+            local ch = lp.Character
+            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+            if not hrp then return end
+            local sp = S.spec
+            if not (sp and S.specTalk) or S.ball then
+                if S.specHome then
+                    hrp.CFrame = S.specHome
+                    hrp.AssemblyLinearVelocity = Vector3.zero
+                    S.specHome = nil
+                end
+                return
+            end
+            local tch = sp.plr.Character
+            local thrp = tch and tch:FindFirstChild("HumanoidRootPart")
+            local target
+            if thrp then
+                target = thrp.CFrame
+            else
+                local head = S.specHead(sp.plr)
+                if head then target = CFrame.new(head.Position - Vector3.new(0, 1.5, 0)) end
+            end
+            if not target then return end
+            if not S.specHome then S.specHome = hrp.CFrame end
+            for _, d in ipairs(ch:GetChildren()) do
+                if d:IsA("BasePart") then d.CanCollide = false end
+            end
+            hrp.CFrame = target
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+        end)
+    end
+    function S.specStart(pl)
+        if not pl or pl == lp then S.specStop() return end
+        S.specBodyOn()
+        local keep = S.spec
+        S.specUnhide(keep)
+        local mode = keep and keep.mode or (S.specKind(pl) == "VR" and "First" or "Behind")   -- VR players open in their own first-person view
+        S.spec = { plr = pl, mode = mode, dist = keep and keep.dist or 8 }
+        pcall(function() game:GetService("StarterGui"):SetCore("SendNotification", { Title = "Spectating", Text = pl.DisplayName .. " (@" .. pl.Name .. ")", Duration = 2 }) end)
+    end
+    function S.specList()
+        local out = {}
+        for _, p in ipairs(PlayersS:GetPlayers()) do
+            if p ~= lp then out[#out + 1] = p end
+        end
+        table.sort(out, function(a, b) return string.lower(a.DisplayName) < string.lower(b.DisplayName) end)
+        return out
+    end
+    function S.specStep(dir)
+        local list = S.specList()
+        if #list == 0 then return end
+        local idx = 0
+        for i, p in ipairs(list) do if S.spec and p == S.spec.plr then idx = i end end
+        idx = ((idx - 1 + dir) % #list) + 1
+        S.specStart(list[idx])
+    end
+    function S.specApply()   -- the camera for this frame, or nil when not spectating
+        local sp = S.spec
+        if not sp then return nil end
+        local pl = sp.plr
+        if not (pl and pl.Parent) then S.specStop() return nil end
+        local head = S.specHead(pl)
+        if not head then return sp.cf end   -- respawning: hold the last view
+        local cf = head:GetPivot()
+        local hp = cf.Position
+        local look = cf.LookVector
+        local flat = Vector3.new(look.X, 0, look.Z)
+        if flat.Magnitude < 0.05 then flat = Vector3.new(0, 0, -1) end
+        flat = flat.Unit
+        local target
+        if sp.mode ~= "First" then S.specUnhide(sp) end
+        if sp.mode == "First" then
+            if sp.hidHead ~= head then   -- their own head is hidden for you so it does not block the view
+                S.specUnhide(sp)
+                sp.hid, sp.hidHead = {}, head
+                local function hide(o) if o:IsA("BasePart") then o.LocalTransparencyModifier = 1; sp.hid[#sp.hid + 1] = o end end
+                hide(head)
+                for _, d in ipairs(head:GetDescendants()) do hide(d) end
+                local ch = pl.Character
+                local chHead = ch and ch:FindFirstChild("Head")
+                if chHead and not head:IsDescendantOf(ch) then hide(chHead) end
+            end
+            target = CFrame.lookAt(hp + look * 0.2, hp + look * 10)
+        elseif sp.mode == "Front" then
+            local pos = hp + flat * sp.dist + Vector3.new(0, 1.2, 0)
+            target = CFrame.lookAt(pos, hp)
+        else
+            local pos = hp - flat * sp.dist + Vector3.new(0, 1.8, 0)
+            target = CFrame.lookAt(pos, hp)
+        end
+        sp.cf = sp.cf and sp.cf:Lerp(target, 0.3) or target
+        return sp.cf
+    end
+
+    -- ===== CAMERA OVERRIDE: one step that lets Spectate and Bouncy Ball own the camera in every mode =====
+    S.camOvr = { on = false }
+    pcall(function() RunService:UnbindFromRenderStep("NoVR_CamOverride") end)
+    RunService:BindToRenderStep("NoVR_CamOverride", Enum.RenderPriority.Last.Value + 20000, function(dt)
+        local c, fov
+        if S.ball then
+            local ok, a, b = pcall(S.ballCam, dt)
+            if ok then c, fov = a, b end
+        end
+        if not c and S.spec then
+            local ok, a = pcall(S.specApply)
+            if ok then c = a end
+        end
+        local o = S.camOvr
+        if c then
+            if not o.on then o.on = true; o.type = cam.CameraType; o.hl = cam.HeadLocked; o.fov = cam.FieldOfView end
+            cam.CameraType = Enum.CameraType.Scriptable
+            cam.HeadLocked = false
+            cam.CFrame = c
+            if fov then cam.FieldOfView = fov end
+        elseif o.on then
+            o.on = false
+            pcall(function() cam.CameraType = o.type; cam.HeadLocked = o.hl; cam.FieldOfView = o.fov end)
+        end
+    end)
+
+    -- ===== BOUNCY BALL =====
+    -- VR Hands: your VR rig follows your head position, so a bouncy sphere carries the head (the hands come along) and the rig rolls and bounces
+    --           like an in-game object. Emulator mode: the sphere carries your real avatar instead.
+    -- You can throw yourself (hold the mouse button) and attach to an in-game object or a player's hand (E).
+    S.ball = nil
+    S.ballCfg = { size = 4, bounce = 0.9, push = 38 }
+    local function ballNote(title, text)
+        pcall(function() game:GetService("StarterGui"):SetCore("SendNotification", { Title = title, Text = text, Duration = 3 }) end)
+    end
+    -- physics ownership: the parts near you are simulated on YOUR computer (no waiting on the server, like your own character), and what you
+    -- do to them is what everyone else sees. The server decides who owns what; asking for a huge simulation radius makes it pick you.
+    function S.ballOwn(on)
+        pcall(function()
+            if on then
+                if not S.ownSaved then
+                    S.ownSaved = { sim = gethiddenproperty and select(1, gethiddenproperty(lp, "SimulationRadius")) or 0, max = lp.MaximumSimulationRadius }
+                end
+                -- every route that exists: the executor's own helper, the hidden property, or just the normal property
+                local gl = (getgenv and getgenv()) or _G
+                if gl.setsimulationradius then pcall(gl.setsimulationradius, 1e9, 1e9) end
+                if sethiddenproperty then pcall(sethiddenproperty, lp, "SimulationRadius", 1e9) end
+                pcall(function() lp.MaximumSimulationRadius = 1e9 end)
+            elseif S.ownSaved then
+                if sethiddenproperty then sethiddenproperty(lp, "SimulationRadius", S.ownSaved.sim) end
+                lp.MaximumSimulationRadius = S.ownSaved.max
+                S.ownSaved = nil
+            end
+        end)
+    end
+    function S.ballStop()
+        local b = S.ball
+        if not b then return end
+        S.ball = nil
+        S.ballOwn(false)
+        if b.conn then b.conn:Disconnect() end
+        if b.hb then b.hb:Disconnect() end
+        for _, c in ipairs(b.ics or {}) do pcall(function() c:Disconnect() end) end
+        if b.gui then pcall(function() b.gui:Destroy() end) end
+        for part, st in pairs(b.saved) do
+            if part.Parent then pcall(function() part.CanCollide = st[1]; part.Massless = st[2] end) end
+        end
+        for _, bp in ipairs(b.hid) do pcall(function() bp.LocalTransparencyModifier = 0 end) end
+        if b.soft then for d in pairs(b.soft) do if d.Parent then pcall(function() d.CanCollide = true end) end end b.soft = nil end
+        local pos = b.part.Parent and b.part.Position
+        pcall(function() b.part:Destroy() end)
+        if not b.vr then
+            local ch = lp.Character
+            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+            local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+            if hrp and hrp.Parent and pos then
+                local lookv = Vector3.new(-math.sin(b.yaw), 0, -math.cos(b.yaw))
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.AssemblyAngularVelocity = Vector3.zero
+                hrp.CFrame = CFrame.lookAt(pos + Vector3.new(0, 3, 0), pos + Vector3.new(0, 3, 0) + lookv)
+            end
+            if hum then
+                hum.PlatformStand = false
+                pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+            end
+            pcall(function() UIS.MouseBehavior = Enum.MouseBehavior.Default end)
+        end
+        ballNote("Bouncy ball", "Ball off.")
+    end
+    local function ballSoften(b, on)
+        if on then
+            if b.soft then return end
+            b.soft = {}
+            local function take(root)
+                if not root then return end
+                for _, d in ipairs(root:GetDescendants()) do
+                    if d:IsA("BasePart") and d ~= b.part and d.CanCollide then
+                        b.soft[d] = true
+                        d.CanCollide = false
+                    end
+                end
+            end
+            take(rig)
+            take(lp.Character)
+        elseif b.soft then
+            for d in pairs(b.soft) do if d.Parent then pcall(function() d.CanCollide = true end) end end
+            b.soft = nil
+        end
+    end
+    local function ballIgnore(b, target, handLike)
+        for _, c in ipairs(b.ncc or {}) do pcall(function() c:Destroy() end) end
+        b.ncc = {}
+        local theirs = {}
+        local function addPart(p) if p:IsA("BasePart") and #theirs < 14 then theirs[#theirs + 1] = p end end
+        if target:IsA("BasePart") then
+            addPart(target)
+            for _, p in ipairs(target:GetConnectedParts(true)) do addPart(p) end
+        end
+        if handLike then   -- a player's hand: their whole avatar, so your head doesn't bump them
+            local m = target:FindFirstAncestorOfClass("Model")
+            if m then for _, p in ipairs(m:GetDescendants()) do addPart(p) end end
+        end
+        local mine = { b.part }
+        for _, c in ipairs(b.cols or {}) do mine[#mine + 1] = c end
+        for _, a in ipairs(mine) do
+            for _, o in ipairs(theirs) do
+                local n = Instance.new("NoCollisionConstraint")
+                n.Part0, n.Part1 = a, o
+                n.Parent = a
+                b.ncc[#b.ncc + 1] = n
+            end
+        end
+    end
+    function S.ballDetach(extraVel)
+        local b = S.ball
+        if not (b and b.att) then return end
+        local att = b.att
+        b.att = nil
+        ballSoften(b, false)
+        for _, c in ipairs(b.ncc or {}) do pcall(function() c:Destroy() end) end
+        b.ncc = nil
+        local carry = Vector3.zero
+        pcall(function() if att.part:IsA("BasePart") then carry = att.part.AssemblyLinearVelocity end end)
+        b.part.AssemblyLinearVelocity = carry + (extraVel or Vector3.zero)
+    end
+    local function ballHandOf(pl)   -- the hand that "picks you up": the VR rig's right hand, else the avatar's
+        local rg = S.specRig(pl)
+        local h = rg and (rg:FindFirstChild("RightHand") or rg:FindFirstChild("VRHead"))
+        if h then return h end
+        local ch = pl.Character
+        return ch and (ch:FindFirstChild("RightHand") or ch:FindFirstChild("Right Arm") or ch:FindFirstChild("HumanoidRootPart"))
+    end
+    function S.ballAttach(mode)   -- mode "player" = nearest player's hand, "aim" = whatever you are looking at
+        local b = S.ball
+        if not b then ballNote("Bouncy ball", "Turn the ball on first.") return end
+        if b.att then S.ballDetach() end
+        local target, handLike, hitPos, hitNrm
+        if mode == "player" then
+            local best, bd = nil, 1e9
+            for _, pl in ipairs(game:GetService("Players"):GetPlayers()) do
+                if pl ~= lp then
+                    local h = ballHandOf(pl)
+                    if h then
+                        local d = (h:GetPivot().Position - b.part.Position).Magnitude
+                        if d < bd then best, bd = h, d end
+                    end
+                end
+            end
+            target, handLike = best, true
+        else
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances = { lp.Character, b.part, S.specRig(lp) }
+            local origin = b.vr and b.part.Position or cam.CFrame.Position
+            local dirv = (b.lastLook or cam.CFrame.LookVector) * (120 * (b.unit or 1))
+            local hit = workspace:Raycast(origin, dirv, params)
+            if hit then
+                target = hit.Instance
+                hitPos, hitNrm = hit.Position, hit.Normal
+                local model = target:FindFirstAncestorOfClass("Model")
+                local owner = model and game:GetService("Players"):GetPlayerFromCharacter(model)
+                if owner then target, handLike = ballHandOf(owner) or target, true end
+            end
+        end
+        if not target then ballNote("Bouncy ball", mode == "player" and "Nobody to be picked up by." or "Nothing in front of you to attach to.") return end
+        local sz = b.part.Size.Y
+        local rad = sz / 2
+        local off, centered
+        if handLike then
+            off = Vector3.new(0, rad + 0.4, 0)   -- just above the hand, in world space
+        else
+            -- the spot you were looking at, kept in the object's own space (so a huge floor or a moving crate both work)
+            local pv = target:IsA("BasePart") and target.CFrame or target:GetPivot()
+            local p, nrm = hitPos, hitNrm
+            if not p then p, nrm = pv.Position, Vector3.new(0, 1, 0) end
+            off = pv:PointToObjectSpace(p + nrm * (rad + 0.15))
+            -- a small object: your head sits exactly IN its middle, so the object is hidden inside the head and whoever grabs it is grabbing the middle of your head
+            if target:IsA("BasePart") and target.Size.Magnitude <= (b.headDia or sz) * S.ballK(b) * 2.5 then
+                off = Vector3.zero
+                centered = true
+                local big = math.max(target.Size.X, target.Size.Y, target.Size.Z)
+                if big > (b.headDia or sz) * S.ballK(b) * 1.05 then
+                    ballNote("Bouncy ball", "This object is bigger than your head, so the ends of it will show. Pick a smaller one to hide it completely.")
+                end
+            end
+        end
+        b.part.AssemblyAngularVelocity = Vector3.zero
+        ballSoften(b, true)
+        ballIgnore(b, target, handLike)   -- your head keeps colliding with the world and other players, just not with what you ride   -- your head and avatar stop colliding with the object while you ride it
+        b.att = { part = target, off = off, world = handLike, r0 = (target:IsA("BasePart") and target.CFrame or target:GetPivot()).Rotation:Inverse() * b.part.CFrame.Rotation }
+        b.safe = b.part.Position
+        S.ballFollow(b)
+        ballNote("Bouncy ball", (centered and "Your head is now in the middle of " or "Attached to ") .. target.Name .. ". Whoever grabs it carries you. WASD / Space / Shift move it, E lets go.")
+    end
+    function S.ballK(b)   -- how much bigger / smaller the rig is now than when the ball started (the SIZE control, +/-)
+        if not (b and b.vr and b.scale0 and S.scale) then return 1 end
+        return math.max(S.scale / b.scale0, 0.02)
+    end
+    function S.ballApplyCfg()
+        local b = S.ball
+        if not b then return end
+        local c = S.ballCfg
+        local K = S.ballK(b)
+        local d = b.vr and (c.size / 4 * K * (b.headDia or b.unit * 2.4) * (b.core or 1)) or c.size
+        if b.vr and b.colInfo then
+            S.ballBuildCols(b, c.size / 4 * K)
+            if b.att then ballIgnore(b, b.att.part, b.att.world) end
+        end
+        b.part.Size = Vector3.new(d, d, d)
+        b.part.CustomPhysicalProperties = PhysicalProperties.new(0.7, 0.9, c.bounce, 10, 1)
+    end
+    -- power bar + mouse / E input (hold the left mouse button, let go to throw; E attaches or lets go)
+    function S.ballHookInputs(b, ball)
+        local sg = Instance.new("ScreenGui")
+        sg.Name = "NoVR_BallPower"
+        sg.ResetOnSpawn = false
+        sg.IgnoreGuiInset = true
+        pcall(function() sg.ScreenInsets = Enum.ScreenInsets.None end)
+        sg.DisplayOrder = 50
+        pcall(function() sg.Parent = lp:WaitForChild("PlayerGui", 3) end)
+        local bar = Instance.new("Frame")
+        bar.AnchorPoint = Vector2.new(0.5, 1)
+        bar.Position = UDim2.new(0.5, 0, 1, -70)
+        bar.Size = UDim2.fromOffset(260, 10)
+        bar.BackgroundColor3 = Color3.new(0, 0, 0)
+        bar.BackgroundTransparency = 0.5
+        bar.BorderSizePixel = 0
+        bar.Visible = false
+        bar.Parent = sg
+        local barc = Instance.new("UICorner"); barc.CornerRadius = UDim.new(0, 5); barc.Parent = bar
+        local fillB = Instance.new("Frame")
+        fillB.Size = UDim2.fromScale(0, 1)
+        fillB.BackgroundColor3 = Color3.fromRGB(190, 120, 255)
+        fillB.BorderSizePixel = 0
+        fillB.Parent = bar
+        local fc = Instance.new("UICorner"); fc.CornerRadius = UDim.new(0, 5); fc.Parent = fillB
+        b.gui, b.bar, b.fillB = sg, bar, fillB
+        b.charge, b.charging = 0, false
+        b.ics = {}
+        b.ics[#b.ics + 1] = RunService.RenderStepped:Connect(function() if b.att then S.ballFollow(b) end end)
+        b.ics[#b.ics + 1] = RunService.Stepped:Connect(function() if b.att then S.ballFollow(b) end end)
+        b.ics[#b.ics + 1] = RunService.Heartbeat:Connect(function() if b.att then S.ballFollow(b) end end)
+        b.ics[#b.ics + 1] = UIS.InputBegan:Connect(function(io, gp)
+            if gp or S.menuOpen or UIS:GetFocusedTextBox() then return end
+            if io.UserInputType == Enum.UserInputType.MouseButton1 then
+                b.charging, b.charge = true, 0
+            elseif io.KeyCode == Enum.KeyCode.E then
+                if b.att then S.ballDetach() else S.ballAttach("aim") end
+            end
+        end)
+        b.ics[#b.ics + 1] = UIS.InputEnded:Connect(function(io)
+            if io.UserInputType == Enum.UserInputType.MouseButton1 and b.charging then
+                b.charging = false
+                bar.Visible = false
+                local p = b.charge
+                b.charge = 0
+                if p > 0.04 and S.ball == b then
+                    local look = b.lastLook or cam.CFrame.LookVector
+                    local u = b.unit or 1
+                    local vel = look * (14 + 110 * p) * u + Vector3.new(0, (6 + 10 * p) * u, 0)
+                    if b.att then S.ballDetach(vel) else ball.AssemblyLinearVelocity = ball.AssemblyLinearVelocity + vel end
+                end
+            end
+        end)
+    end
+    -- stick to the object you are attached to: placed exactly on it every frame (no springs, so nothing can fling you), carrying its speed
+    function S.ballFollow(b)
+        local att = b.att
+        if not att then return end
+        local ball = b.part
+        if not (att.part and att.part.Parent) then S.ballDetach() return end
+        local pv = att.part:IsA("BasePart") and att.part.CFrame or att.part:GetPivot()
+        local pos = att.world and (pv.Position + att.off) or pv:PointToWorldSpace(att.off)
+        local u = b.unit or 1
+        local v = Vector3.zero
+        pcall(function() if att.part:IsA("BasePart") then v = att.part.AssemblyLinearVelocity end end)
+        -- the object is being thrown / flung (huge speed, or it jumped across the map): let go and go back to the last safe spot
+        local jump = b.safe and (pos - b.safe).Magnitude or 0
+        local now = os.clock()
+        local gap = math.clamp(now - (b.lastFollow or now), 0, 0.5)
+        b.lastFollow = now
+        -- thrown objects are FAST on purpose: only a real teleport (further than the object could have flown meanwhile) or the void lets go
+        local allowed = 400 * u + v.Magnitude * gap * 4
+        local void = pos.Y < workspace.FallenPartsDestroyHeight + 40
+        if v.Magnitude > 4000 * u or jump > allowed or void then
+            local safe = b.safe or ball.Position
+            S.ballDetach()
+            ball.AssemblyLinearVelocity = Vector3.zero
+            ball.CFrame = CFrame.new(safe + Vector3.new(0, 2 * u, 0))
+            ballNote("Bouncy ball", void and "The object fell out of the world, so you were put back." or "The object teleported away, so you were dropped back where you were.")
+            return
+        end
+        -- the HEAD is what meets the ground, not the object: when the object rests on (or near) the floor the head sinks to the floor inside it,
+        -- so a big crate or log never holds your head up in the air
+        if not att.world and att.part:IsA("BasePart") then
+            local rr = b.vr and (b.headDia * S.ballK(b) * S.ballCfg.size / 4 / 2) or ball.Size.Y / 2
+            local sz, rot = att.part.Size, att.part.CFrame
+            local halfY = (math.abs(rot.RightVector.Y) * sz.X + math.abs(rot.UpVector.Y) * sz.Y + math.abs(rot.LookVector.Y) * sz.Z) / 2
+            local drop = halfY - rr
+            if drop > 0.02 then
+                if not b.gp then
+                    b.gp = RaycastParams.new()
+                    b.gp.FilterType = Enum.RaycastFilterType.Exclude
+                end
+                local ex = { ball, att.part }
+                if b.vr and rig then ex[#ex + 1] = rig end
+                if lp.Character then ex[#ex + 1] = lp.Character end
+                b.gp.FilterDescendantsInstances = ex
+                local hit = workspace:Raycast(pos, Vector3.new(0, -(halfY + rr * 3), 0), b.gp)
+                if hit then
+                    local gap = (pos.Y - halfY) - hit.Position.Y   -- how far the object's underside is above the floor
+                    local w = math.clamp(1 - gap / (2 * rr), 0, 1)
+                    local newY = math.max(hit.Position.Y + rr, pos.Y - drop * w)
+                    pos = Vector3.new(pos.X, math.min(newY, pos.Y), pos.Z)
+                end
+            end
+        end
+        b.safe = pos
+        ball.CFrame = CFrame.new(pos) * (pv.Rotation * (att.r0 or CFrame.new()))   -- your head turns with the object, at the object's own turning speed
+        ball.AssemblyLinearVelocity = v
+        ball.AssemblyAngularVelocity = Vector3.zero
+    end
+    -- move the object you ride: WASD (relative to where you look), Space up, Shift down. Free objects are driven by speed (so it also moves
+    -- for everyone when you own it); fixed ones are moved on your side only. E lets go.
+    function S.ballDrive(b, dt)
+        local att = b.att
+        if not att or att.world or UIS:GetFocusedTextBox() or S.menuOpen then return end
+        local tgt = att.part
+        if not (tgt and tgt:IsA("BasePart")) then return end
+        local mv = Vector3.zero
+        if keys[Enum.KeyCode.W] then mv += Vector3.new(0, 0, -1) end
+        if keys[Enum.KeyCode.S] then mv += Vector3.new(0, 0, 1) end
+        if keys[Enum.KeyCode.A] then mv += Vector3.new(-1, 0, 0) end
+        if keys[Enum.KeyCode.D] then mv += Vector3.new(1, 0, 0) end
+        local up = (keys[Enum.KeyCode.Space] and 1 or 0) - (keys[Enum.KeyCode.LeftShift] and 1 or 0)
+        local look = b.lastLook or cam.CFrame.LookVector
+        local flat = Vector3.new(look.X, 0, look.Z)
+        if flat.Magnitude < 0.05 then flat = Vector3.new(0, 0, -1) end
+        local dir = CFrame.lookAt(Vector3.zero, flat.Unit) * Vector3.new(mv.X, 0, mv.Z)
+        local v = (dir.Magnitude > 0 and dir.Unit or Vector3.zero) * (28 * (b.unit or 1)) + Vector3.new(0, up * 22 * (b.unit or 1), 0)
+        if tgt.Anchored then
+            if v.Magnitude > 0 then tgt.CFrame = tgt.CFrame + v * dt end
+        else
+            if v.Magnitude > 0 then
+                tgt.AssemblyLinearVelocity = Vector3.zero
+                tgt.CFrame = tgt.CFrame + v * dt   -- moved this very frame, so your view never waits for physics
+            else
+                tgt.AssemblyLinearVelocity = Vector3.zero   -- no input = it hangs still instead of falling
+            end
+        end
+    end
+    -- shared per-frame work: power bar, following the object you are attached to, falling out of the world
+    function S.ballCommon(b, ball, dt)
+        if b.vr and b.scale0 then   -- the SIZE control changed: the ball and its head shape grow / shrink with the rig, with the same speeds
+            local k = S.scale / b.scale0
+            if k ~= b.lastK then
+                b.lastK = k
+                b.unit = (b.unit0 or b.unit) * math.max(k, 0.02)
+                S.ballApplyCfg()
+            end
+        end
+        if b.charging then
+            b.charge = math.min(b.charge + dt / 1.1, 1)
+            b.bar.Visible = true
+            b.fillB.Size = UDim2.fromScale(b.charge, 1)
+        end
+        if b.att then
+            local att = b.att
+            if not (att.part and att.part.Parent) then
+                S.ballDetach()
+            else
+                S.ballDrive(b, dt)
+                S.ballFollow(b)
+            end
+        end
+        if not b.att then   -- rolling without slipping: the spin is speed divided by radius, so a big ball turns slowly and a small one fast
+            local r = b.vr and (b.headDia * S.ballK(b) * S.ballCfg.size / 4 / 2) or ball.Size.Y / 2   -- the head's real radius, not the small inner sphere
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances = b.vr and { ball, rig } or { ball, lp.Character }
+            local hit = workspace:Raycast(ball.Position, Vector3.new(0, -(r + 0.35 * math.max(r, 1)), 0), params)
+            if hit then
+                local n = hit.Normal
+                local v = ball.AssemblyLinearVelocity
+                local vt = v - n * v:Dot(n)   -- speed along the ground
+                if vt.Magnitude > 0.2 then
+                    local want = n:Cross(vt) / r
+                    local w = ball.AssemblyAngularVelocity
+                    local along = n * w:Dot(n)   -- spin around the ground normal is left alone
+                    local k = math.min(dt * 14, 1)
+                    ball.AssemblyAngularVelocity = along + (w - along):Lerp(want, k)
+                end
+            end
+        end
+        if ball.Position.Y < workspace.FallenPartsDestroyHeight + 30 then   -- fell out of the world: back to a safe spot
+            ball.AssemblyLinearVelocity = Vector3.zero
+            ball.CFrame = CFrame.new(0, 60, 0)
+        end
+    end
+    -- the head's real shape: every visible part of the head and its accessories (hat, glasses...) becomes an invisible collision part
+    -- welded to the ball, so the ball collides exactly where the head and hat are. (The sphere inside only drives the rolling.)
+    -- accessories whose collision should follow the exact mesh (every triangle, hollow under a brim included): their asset ids
+    S.ballPreciseIds = { 14745300535, 13478010947 }
+    local function meshNum(s) return s and tonumber(string.match(tostring(s), "%d+")) or nil end
+    function S.ballPreciseSet()
+        if S.ballPre then return S.ballPre end
+        local set = {}
+        for _, id in ipairs(S.ballPreciseIds) do
+            pcall(function()
+                local objs = game:GetObjects("rbxassetid://" .. id)   -- the real accessory, to read its real mesh ids
+                for _, o in ipairs(objs) do
+                    for _, d in ipairs(o:GetDescendants()) do
+                        if d:IsA("MeshPart") then local n = meshNum(d.MeshId); if n then set[n] = true end end
+                        if d:IsA("SpecialMesh") then local n = meshNum(d.MeshId); if n then set[n] = true end end
+                    end
+                    if o:IsA("MeshPart") then local n = meshNum(o.MeshId); if n then set[n] = true end end
+                end
+            end)
+        end
+        S.ballPre = set
+        return set
+    end
+    function S.ballGather(H0, off, hd)
+        local list = {}
+        local pre = S.ballPreciseSet()
+        for _, d in ipairs(rig:GetDescendants()) do
+            if d:IsA("BasePart") and d.Transparency < 0.95 and d.Size.Magnitude > 0.2 and d.Size.Magnitude < hd * 3 then
+                local skip, a = false, d.Parent
+                while a and a ~= rig do
+                    if a.Name == "LeftHand" or a.Name == "RightHand" then skip = true break end
+                    a = a.Parent
+                end
+                if not skip then
+                    local e = { size = d.Size, rel = CFrame.new(-off) * H0:Inverse() * d.CFrame, shape = (d:IsA("Part") and d.Shape) or Enum.PartType.Block,
+                                mesh = d:IsA("MeshPart") and d or nil, name = d:GetFullName(), kind = d:IsA("MeshPart") and "mesh" or "box" }
+                    if d:IsA("MeshPart") and pre[meshNum(d.MeshId) or -1] then e.precise = true; e.kind = "mesh(exact)" end
+                    local sm = d:FindFirstChildOfClass("SpecialMesh")
+                    if sm and not d:IsA("MeshPart") then
+                        if sm.MeshId ~= "" then
+                            -- a custom mesh (hat, glasses, accessory): build a real mesh with a convex collision shape from the same asset
+                            local ok, mp = pcall(function()
+                                local exact = pre[meshNum(sm.MeshId) or -1]
+                                if exact then e.precise = true end
+                                return game:GetService("AssetService"):CreateMeshPartAsync(sm.MeshId, { CollisionFidelity = exact and Enum.CollisionFidelity.PreciseConvexDecomposition or Enum.CollisionFidelity.Hull })
+                            end)
+                            if ok and mp then
+                                e.mesh = mp
+                                e.size = Vector3.new(mp.Size.X * sm.Scale.X, mp.Size.Y * sm.Scale.Y, mp.Size.Z * sm.Scale.Z)
+                                e.rel = e.rel * CFrame.new(sm.Offset)
+                                e.kind = "mesh(special)"
+                            end
+                        elseif sm.MeshType == Enum.MeshType.Head or d.Name == "Head" then
+                            -- the classic rounded head: an upright cylinder of the same width and height
+                            local D = math.min(d.Size.Y, d.Size.Z) * sm.Scale.Z
+                            local Hh = d.Size.Y * sm.Scale.Y
+                            e.shape = Enum.PartType.Cylinder
+                            e.size = Vector3.new(Hh, D, D)
+                            e.rel = e.rel * CFrame.new(sm.Offset) * CFrame.Angles(0, 0, math.pi / 2)
+                            e.kind = "head cylinder"
+                        end
+                    end
+                    list[#list + 1] = e
+                    if #list >= 60 then break end
+                end
+            end
+        end
+        return list
+    end
+    function S.ballBuildCols(b, f)
+        for _, c in ipairs(b.cols or {}) do pcall(function() c:Destroy() end) end
+        b.cols = {}
+        for _, e in ipairs(b.colInfo or {}) do
+            local p
+            if e.mesh then   -- the real hat / head mesh: its own convex shape collides, not a box around it
+                pcall(function()
+                    p = e.mesh:Clone()
+                    for _, ch in ipairs(p:GetChildren()) do ch:Destroy() end
+                    p.Anchored = false
+                    p.CollisionFidelity = e.precise and Enum.CollisionFidelity.PreciseConvexDecomposition or Enum.CollisionFidelity.Hull
+                end)
+            end
+            if not p then
+                p = Instance.new("Part")
+                p.Shape = e.shape
+            end
+            p.Name = "NoVR_BallCol"
+            p.Size = e.size * f
+            p.Transparency = 1
+            p.Massless = true
+            p.CanTouch = false
+            p.CanQuery = false
+            p.CanCollide = true
+            p.CustomPhysicalProperties = PhysicalProperties.new(0.7, 0.9, S.ballCfg.bounce, 10, 1)
+            p.CFrame = b.part.CFrame * CFrame.new(e.rel.Position * f) * e.rel.Rotation
+            p.Parent = b.part
+            local w = Instance.new("WeldConstraint")
+            w.Part0, w.Part1 = b.part, p
+            w.Parent = p
+            b.cols[#b.cols + 1] = p
+        end
+    end
+    function S.ballStart()
+        if S.ball then return end
+        S.ballOwn(true)
+        task.spawn(function()
+            local c = S.ballCfg
+            if not U.emu then
+                -- VR Hands: the ball carries the head position, the VR rig follows it
+                local unit = math.max(headUnit(), 0.5)
+                -- the sphere is as big as the real head (hat and all), centred on it, so it hits things where the head actually is
+                local hd, hcenter = unit * 2.4, camPos
+                pcall(function()
+                    local hm = rig:FindFirstChild("VRHead")
+                    local bcf, bsz
+                    if hm and hm:IsA("Model") then bcf, bsz = hm:GetBoundingBox()
+                    elseif hm and hm:IsA("BasePart") then bcf, bsz = hm.CFrame, hm.Size end
+                    if bcf then
+                        hd = math.max(bsz.X, bsz.Y, bsz.Z) * 0.95
+                        hcenter = bcf.Position
+                    end
+                end)
+                local H0 = headCF
+                local offv = H0:PointToObjectSpace(hcenter)
+                local info = S.ballGather(H0, offv, hd)
+                pcall(function()
+                    local L = { "collision parts built from your head (" .. #info .. "), head diameter " .. string.format("%.2f", hd) }
+                    for _, e in ipairs(info) do
+                        L[#L + 1] = string.format("%-14s", e.kind or "box") .. string.format("%.2f x %.2f x %.2f  ", e.size.X, e.size.Y, e.size.Z) .. e.name
+                    end
+                    if writefile then writefile("NoVR_ball_diag.txt", table.concat(L, "\n")) end
+                end)
+                local d = c.size / 4 * hd * (#info > 0 and 0.6 or 0.95)   -- with the real head shape the sphere only drives the rolling
+                local ball = Instance.new("Part")
+                ball.Name = "NoVR_Ball"
+                ball.Shape = Enum.PartType.Ball
+                ball.Size = Vector3.new(d, d, d)
+                ball.Transparency = 1
+                ball.CanCollide = true
+                ball.CanQuery = false
+                ball.CustomPhysicalProperties = PhysicalProperties.new(0.7, 0.9, c.bounce, 10, 1)
+                ball.CFrame = CFrame.new(hcenter)
+                ball.Parent = workspace
+                local b = { vr = true, unit = unit, unit0 = unit, scale0 = S.scale, headDia = hd, off = offv, colInfo = info, core = (#info > 0 and 0.6 or 0.95), part = ball, saved = {}, hid = {}, yaw = 0, pitch = 0, shake = 0, tilt = 0, pv = Vector3.zero, space = false, t = 0 }
+                ball.AssemblyLinearVelocity = Vector3.new(0, 6 * unit, 0)
+                S.ball = b
+                S.ballBuildCols(b, c.size / 4)
+                S.ballHookInputs(b, ball)
+                b.hb = RunService.Heartbeat:Connect(function(d2)
+                    if S.ball ~= b then return end
+                    if not ball.Parent then S.ballStop() return end
+                    S.ballCommon(b, ball, d2)
+                end)
+                ballNote("Bouncy ball", "Your VR rig is the ball. WASD rolls, Space hops, hold the mouse button to throw, E attaches.")
+                return
+            end
+            -- emulator mode: the sphere carries your real avatar
+            local ch = lp.Character
+            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+            local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+            local head = ch and ch:FindFirstChild("Head")
+            if not (hrp and hum and head) then ballNote("Bouncy ball", "Your character isn't ready yet. Try again in a moment.") return end
+            local ball = Instance.new("Part")
+            ball.Name = "NoVR_Ball"
+            ball.Shape = Enum.PartType.Ball
+            ball.Size = Vector3.new(c.size, c.size, c.size)
+            ball.Transparency = 1
+            ball.CanCollide = true
+            ball.CanQuery = false
+            ball.CustomPhysicalProperties = PhysicalProperties.new(0.7, 0.9, c.bounce, 10, 1)
+            ball.CFrame = CFrame.new(hrp.Position + Vector3.new(0, 1, 0))
+            local b = { part = ball, saved = {}, hid = {}, yaw = 0, pitch = 0, shake = 0, fov = 70, tilt = 0.3, pv = Vector3.zero, space = false, t = 0 }
+            local look = hrp.CFrame.LookVector
+            b.yaw = math.atan2(-look.X, -look.Z)
+            for _, d in ipairs(ch:GetDescendants()) do
+                if d:IsA("BasePart") then
+                    b.saved[d] = { d.CanCollide, d.Massless }
+                    d.CanCollide = false
+                    d.Massless = true
+                end
+            end
+            ball.Parent = workspace
+            local w = Instance.new("WeldConstraint")
+            w.Part0, w.Part1 = ball, hrp
+            w.Parent = ball
+            local function hide(o) if o:IsA("BasePart") then o.LocalTransparencyModifier = 1; b.hid[#b.hid + 1] = o end end
+            hide(head)
+            for _, d in ipairs(ch:GetChildren()) do
+                if d:IsA("Accessory") then for _, p in ipairs(d:GetDescendants()) do hide(p) end end
+            end
+            ball.AssemblyLinearVelocity = Vector3.new(0, 6, 0)
+            S.ball = b
+            S.ballHookInputs(b, ball)
+            b.conn = RunService.Heartbeat:Connect(function(dt)
+                local ch2 = lp.Character
+                if not (ball.Parent and hrp.Parent and ch2 == ch) then S.ballStop() return end
+                hum.PlatformStand = true
+                S.ballCommon(b, ball, dt)
+                if not b.att and not UIS:GetFocusedTextBox() then
+                    local mv = Vector3.zero
+                    if keys[Enum.KeyCode.W] then mv += Vector3.new(0, 0, -1) end
+                    if keys[Enum.KeyCode.S] then mv += Vector3.new(0, 0, 1) end
+                    if keys[Enum.KeyCode.A] then mv += Vector3.new(-1, 0, 0) end
+                    if keys[Enum.KeyCode.D] then mv += Vector3.new(1, 0, 0) end
+                    if mv.Magnitude > 0 then
+                        local dir = CFrame.Angles(0, b.yaw, 0) * mv.Unit
+                        ball:ApplyImpulse(dir * ball.AssemblyMass * S.ballCfg.push * dt)
+                    end
+                    local sp = keys[Enum.KeyCode.Space] and true or false
+                    if sp and not b.space then   -- hop, only when sitting on something
+                        local params = RaycastParams.new()
+                        params.FilterType = Enum.RaycastFilterType.Exclude
+                        params.FilterDescendantsInstances = { ch, ball }
+                        local hit = workspace:Raycast(ball.Position, Vector3.new(0, -(S.ballCfg.size / 2 + 0.6), 0), params)
+                        if hit then ball:ApplyImpulse(Vector3.new(0, ball.AssemblyMass * 42, 0)) end
+                    end
+                    b.space = sp
+                end
+            end)
+            ballNote("Bouncy ball", "WASD roll, Space hop, mouse looks around. Hold the mouse button to throw.")
+        end)
+    end
+    -- VR Hands: called from the main control step instead of flying; returns where the head (and so the VR rig) is this frame
+    function S.ballVR(dt, pos, rot, mv)
+        local b = S.ball
+        if not (b and b.vr and b.part.Parent) then return pos, rot end
+        local ball = b.part
+        if b.att then S.ballFollow(b) end
+        if not b.att and mv.Magnitude > 0 then
+            local look = rot.LookVector
+            local flat = Vector3.new(look.X, 0, look.Z)
+            if flat.Magnitude < 0.05 then flat = Vector3.new(0, 0, -1) end
+            local dir = CFrame.lookAt(Vector3.zero, flat.Unit) * Vector3.new(mv.X, 0, mv.Z)
+            if dir.Magnitude > 0.01 then ball:ApplyImpulse(dir.Unit * ball.AssemblyMass * S.ballCfg.push * b.unit * dt) end
+        end
+        local sp = keys[Enum.KeyCode.Space] and not b.att and not UIS:GetFocusedTextBox()
+        if sp and not b.space then   -- hop, only when sitting on something
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances = { ball }
+            local hit = workspace:Raycast(ball.Position, Vector3.new(0, -(ball.Size.Y / 2 + 0.6 * b.unit), 0), params)
+            if hit then ball:ApplyImpulse(Vector3.new(0, ball.AssemblyMass * 42 * b.unit, 0)) end
+        end
+        b.space = sp and true or false
+        b.t = b.t + dt
+        local v = ball.AssemblyLinearVelocity
+        local jolt = (v - b.pv).Magnitude / math.max(b.unit, 0.5)
+        b.pv = v
+        if jolt > 18 then b.shake = math.max(b.shake, math.min(jolt / 70, 1)) end   -- every bounce knocks the view
+        b.shake = b.shake * math.exp(-dt * 5)
+        local sk = Vector3.new(math.noise(b.t * 28, 1.3), math.noise(b.t * 28, 5.1), math.noise(b.t * 28, 9.7)) * b.shake * 0.07
+        b.lastLook = rot.LookVector
+        b.sk = sk
+        return ball.Position, rot
+    end
+    -- VR Hands: the VR rig (head + hands) rolls and tumbles with the sphere, while your screen camera looks around freely and never turns with it
+    function S.ballVRView(headCF, camBack, rot)
+        local b = S.ball
+        if not (b and b.vr and b.part.Parent) then return headCF, camBack end
+        local ball = b.part
+        local pos = ball.Position
+        local sk = b.sk or Vector3.zero
+        local look = rot * CFrame.Angles(sk.X, sk.Y, sk.Z * 1.4)   -- free look, with the bounce shake on top
+        local D = S.thirdPerson and (S.curD or 0) or 0
+        if b.att then D = math.max(D, ball.Size.Y * 1.8) end   -- riding an object: the view pulls back so you can see it
+        local rig = CFrame.new(pos) * ball.CFrame.Rotation * CFrame.new(-(b.off or Vector3.zero) * S.ballK(b))   -- what the game sees as your head: the real head sits at the ball's centre and spins with it
+        return rig, CFrame.new(pos - look.LookVector * D) * look.Rotation
+    end
+    -- emulator mode: first-person view from the avatar's head that leans, shakes and stretches with the ball
+    function S.ballCam(dt)
+        local b = S.ball
+        if not (b and not b.vr and b.part.Parent) then return nil end
+        local ch = lp.Character
+        local head = ch and ch:FindFirstChild("Head")
+        if not head then return nil end
+        dt = math.clamp(dt or 0.016, 0.001, 0.1)
+        b.t = b.t + dt
+        if S.menuOpen then
+            if UIS.MouseBehavior == Enum.MouseBehavior.LockCenter then UIS.MouseBehavior = Enum.MouseBehavior.Default end
+        else
+            if UIS.MouseBehavior ~= Enum.MouseBehavior.LockCenter then UIS.MouseBehavior = Enum.MouseBehavior.LockCenter end
+            local md = UIS:GetMouseDelta()
+            b.yaw = b.yaw - md.X * 0.0035
+            b.pitch = math.clamp(b.pitch - md.Y * 0.0035, -1.45, 1.45)
+        end
+        local v = b.part.AssemblyLinearVelocity
+        local jolt = (v - b.pv).Magnitude
+        b.pv = v
+        if jolt > 18 then b.shake = math.max(b.shake, math.min(jolt / 70, 1)) end
+        b.shake = b.shake * math.exp(-dt * 5)
+        local rot = b.part.CFrame.Rotation
+        local tilt = CFrame.new():Lerp(rot, b.tilt)
+        local sk = Vector3.new(math.noise(b.t * 28, 1.3), math.noise(b.t * 28, 5.1), math.noise(b.t * 28, 9.7)) * b.shake * 0.09
+        local cf = CFrame.new(head.Position) * tilt * CFrame.Angles(0, b.yaw, 0) * CFrame.Angles(b.pitch, 0, 0) * CFrame.Angles(sk.X, sk.Y, sk.Z * 1.6)
+        cf = cf + cf.LookVector * 0.25
+        b.lastLook = cf.LookVector
+        local want = 70 + math.min(v.Magnitude * 0.35, 26) + b.shake * 6
+        b.fov = b.fov + (want - b.fov) * math.min(dt * 6, 1)
+        return cf, b.fov
+    end
+    pcall(function() lp.CharacterAdded:Connect(function() if S.ball and not S.ball.vr then S.ballStop() end end) end)
+
+    -- ===== ESP: see other players through walls, coloured by VR / PC / Mobile =====
+    S.esp = { on = false, kinds = { VR = true, PC = true, Mobile = true, Other = true }, names = true, items = {} }
+    do
+    local ESP_COL = { VR = Color3.fromRGB(190, 120, 255), PC = Color3.fromRGB(90, 170, 255), Mobile = Color3.fromRGB(110, 230, 140), Other = Color3.fromRGB(235, 235, 235) }
+    local function espParent()   -- CoreGui first: outlines only draw reliably from there; the hidden-UI folder is the fallback
+        local ok, g = pcall(function() return game:GetService("CoreGui") end)
+        if ok and g then return g end
+        local ok2, h = pcall(function() return gethui and gethui() end)
+        if ok2 and h then return h end
+        return lp:FindFirstChildOfClass("PlayerGui")
+    end
+    local function espErr(msg)
+        S.esp.lastErr = tostring(msg)
+        if not S.esp.warned then
+            S.esp.warned = true
+            pcall(function() game:GetService("StarterGui"):SetCore("SendNotification", { Title = "ESP", Text = "Problem: " .. tostring(msg):sub(1, 120), Duration = 6 }) end)
+        end
+    end
+    local function espClear(uid)
+        local it = S.esp.items[uid]
+        if it then
+            pcall(function() it.hl:Destroy() end)
+            pcall(function() it.bb:Destroy() end)
+            S.esp.items[uid] = nil
+        end
+    end
+    function S.espClearAll()
+        for uid in pairs(S.esp.items) do espClear(uid) end
+    end
+    local ESP_MAX, ESP_HL = 40, 30   -- up to 40 players; the nearest 30 get a glowing outline, the rest a box (Roblox only draws ~31 outlines at once)
+    local function espStep()
+        local e = S.esp
+        local Pl = game:GetService("Players")
+        local cands = {}
+        local cm = workspace.CurrentCamera or cam
+        local camPos = cm.CFrame.Position
+        for _, pl in ipairs(Pl:GetPlayers()) do
+            if pl ~= lp and pl.Parent then
+                local kind = S.specKind(pl)
+                local rg = S.specRig(pl)
+                local ch = pl.Character
+                local adorn = (kind == "VR" and rg) or ch
+                local head = S.specHead(pl)
+                if e.kinds[kind] and adorn and adorn.Parent and head and head.Parent then
+                    cands[#cands + 1] = { pl = pl, kind = kind, adorn = adorn, head = head, d = (head.Position - camPos).Magnitude }
+                end
+            end
+        end
+        table.sort(cands, function(x, y) return x.d < y.d end)
+        local seen = {}
+        for i = 1, math.min(#cands, ESP_MAX) do
+            local c = cands[i]
+            local uid = c.pl.UserId
+            seen[uid] = true
+            local mode = i <= ESP_HL and "hl" or "box"
+            local it = e.items[uid]
+            if it and (it.adorn ~= c.adorn or it.mode ~= mode or not it.hl.Parent) then espClear(uid) it = nil end
+            if not it then
+                local hl
+                if mode == "hl" then
+                    hl = Instance.new("Highlight")
+                    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                    hl.FillTransparency = 0.65
+                    hl.OutlineTransparency = 0
+                    hl.Adornee = c.adorn
+                else
+                    hl = Instance.new("BoxHandleAdornment")
+                    hl.AlwaysOnTop = true
+                    hl.ZIndex = 5
+                    hl.Transparency = 0.6
+                end
+                hl.Name = "NoVR_ESP"
+                local bb = Instance.new("BillboardGui")
+                bb.Name = "NoVR_ESPTag"
+                bb.AlwaysOnTop = true
+                bb.Size = UDim2.fromOffset(160, 34)
+                bb.StudsOffset = Vector3.new(0, 2.6, 0)
+                bb.ResetOnSpawn = false
+                local tl = Instance.new("TextLabel")
+                tl.Size = UDim2.fromScale(1, 1)
+                tl.BackgroundTransparency = 1
+                tl.Font = Enum.Font.GothamBold
+                tl.TextSize = 13
+                tl.TextStrokeTransparency = 0.4
+                tl.Parent = bb
+                local par = espParent()
+                pcall(function() hl.Parent = par end)
+                pcall(function() bb.Parent = par end)
+                it = { hl = hl, bb = bb, tl = tl, adorn = c.adorn, mode = mode }
+                e.items[uid] = it
+            end
+            local col = ESP_COL[c.kind] or ESP_COL.Other
+            if it.mode == "hl" then
+                it.hl.FillColor, it.hl.OutlineColor = col, col
+            else
+                it.hl.Color3 = col
+                pcall(function()
+                    local cf, size = c.adorn:GetBoundingBox()
+                    it.hl.Adornee = c.head
+                    it.hl.Size = size
+                    it.hl.CFrame = c.head.CFrame:ToObjectSpace(cf)
+                end)
+            end
+            it.tl.TextColor3 = col
+            it.bb.Adornee = c.head
+            it.bb.Enabled = e.names
+            it.tl.Text = c.pl.DisplayName .. "  [" .. c.kind .. "]  " .. math.floor(c.d) .. " studs"
+        end
+        for uid in pairs(e.items) do
+            if not seen[uid] then espClear(uid) end
+        end
+    end
+    function S.espSet(on)
+        local e = S.esp
+        e.on = on and true or false
+        if e.conn then e.conn:Disconnect() e.conn = nil end
+        if e.evs then for _, cn in ipairs(e.evs) do cn:Disconnect() end e.evs = nil end
+        if e.on then
+            local acc = 0
+            e.conn = RunService.Heartbeat:Connect(function(dt)
+                acc += dt
+                if acc < 0.2 then return end
+                acc = 0
+                local ok, er = pcall(espStep)
+                if not ok then espErr(er) end
+            end)
+            local ok0, er0 = pcall(espStep)
+            if not ok0 then espErr(er0) end
+            local Pl = game:GetService("Players")
+            e.evs = {
+                Pl.PlayerRemoving:Connect(function(pl)   -- someone leaves: their ESP disappears at once
+                    espClear(pl.UserId)
+                end),
+                Pl.PlayerAdded:Connect(function(pl)   -- someone joins: ESP appears as soon as their character is there
+                    pl.CharacterAdded:Connect(function() task.wait(0.3) if S.esp.on then pcall(espStep) end end)
+                end),
+            }
+        else
+            S.espClearAll()
+        end
+    end
+
+    end
+
+    -- ===== CHARACTER DESYNC: others keep seeing your character where it was; you move freely. Needs an executor with the raknet library =====
+    S.desync = { on = false }
+    do
+    local function dsNote(text)
+        pcall(function() game:GetService("StarterGui"):SetCore("SendNotification", { Title = "Character Desync", Text = text, Duration = 5 }) end)
+    end
+    local function dsLib()
+        local gl = (getgenv and getgenv()) or _G
+        return gl.raknet
+    end
+    local function dsDiag(rk)
+        if not (rk and writefile) then return end
+        local names = {}
+        for k, v in pairs(rk) do names[#names + 1] = tostring(k) .. " = " .. typeof(v) end
+        table.sort(names)
+        pcall(writefile, "NoVR_raknet_diag.txt", "raknet functions in this executor:\n" .. table.concat(names, "\n"))
+    end
+    function S.desyncSet(on)
+        local d = S.desync
+        local rk = dsLib()
+        if on == d.on then return end
+        if not rk then
+            dsNote("Your executor has no raknet library, so desync can't run.")
+            return
+        end
+        dsDiag(rk)
+        local fn = rk.desync or rk.Desync or rk.set_desync
+        if type(fn) ~= "function" then
+            dsNote("This raknet has no desync function. The list of what it has was saved to NoVR_raknet_diag.txt - send it to me.")
+            return
+        end
+        local ch = lp.Character
+        local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+        if on then
+            if not hrp then dsNote("No character to desync.") return end
+            local ok, err = pcall(fn, true)
+            if not ok then dsNote("Desync failed: " .. tostring(err):sub(1, 100)) return end
+            d.on = true
+            d.pos = hrp.CFrame
+            -- a marker where everybody else still sees you
+            local m = Instance.new("Part")
+            m.Name = "NoVR_DesyncMarker"
+            m.Anchored, m.CanCollide, m.CanTouch, m.CanQuery = true, false, false, false
+            m.Size = Vector3.new(2, 5, 1)
+            m.Material = Enum.Material.ForceField
+            m.Color = Color3.fromRGB(190, 120, 255)
+            m.Transparency = 0.35
+            m.CFrame = d.pos
+            local bb = Instance.new("BillboardGui")
+            bb.Size = UDim2.fromOffset(140, 26)
+            bb.StudsOffset = Vector3.new(0, 3.6, 0)
+            bb.AlwaysOnTop = true
+            bb.Adornee = m
+            local tl = Instance.new("TextLabel")
+            tl.Size = UDim2.fromScale(1, 1)
+            tl.BackgroundTransparency = 1
+            tl.Text = "Others see you here"
+            tl.Font = Enum.Font.GothamBold
+            tl.TextSize = 12
+            tl.TextColor3 = Color3.new(1, 1, 1)
+            tl.TextStrokeTransparency = 0.4
+            tl.Parent = bb
+            bb.Parent = m
+            m.Parent = workspace
+            d.marker = m
+            local bb2 = S.ball and S.ball.att
+            if bb2 and bb2.part and bb2.part:IsA("BasePart") then   -- riding an object: the marker stays fixed to that object too
+                d.rel = bb2.part.CFrame:ToObjectSpace(d.pos)
+                d.obj = bb2.part
+                d.follow = RunService.Heartbeat:Connect(function()
+                    if d.obj and d.obj.Parent and d.marker then d.marker.CFrame = d.obj.CFrame * d.rel end
+                end)
+            end
+            dsNote("Desync ON. Others still see you at the purple marker.")
+        else
+            pcall(fn, false)
+            d.on = false
+            if d.follow then d.follow:Disconnect() d.follow = nil end
+            d.obj = nil
+            if d.marker then pcall(function() d.marker:Destroy() end) d.marker = nil end
+            dsNote("Desync OFF.")
+        end
+    end
+    pcall(function()
+        lp.CharacterRemoving:Connect(function()
+            if S.desync.on then S.desyncSet(false) end
+        end)
+    end)
+
+    end
+
     -- ===== KEYBINDS: every key action can be moved to another key (Keybinds window) =====
     local KB = { file = "NoVR_Keybinds.json", cur = {}, map = {}, blocked = {}, byDef = {}, capture = nil, byId = {} }
     KB.actions = {
@@ -3022,7 +4115,9 @@ task.spawn(function()
 
         if S.menuOpen then mv = Vector3.zero end   -- opening menu is up: don't fly around
         -- amt is 1 for keys, and less than 1 for a partly pushed joystick
-        if mv.Magnitude > 0 then
+        if S.ball and S.ball.vr then
+            camPos, rot = S.ballVR(dt, camPos, rot, mv)   -- Bouncy Ball: the ball decides where the head goes
+        elseif mv.Magnitude > 0 then
             local amt = math.min(mv.Magnitude, 1)
             camPos = camPos + (rot * mv.Unit) * spd * dt * amt
         end
@@ -3104,6 +4199,7 @@ task.spawn(function()
                 camBack = CFrame.new(target - rot.LookVector * dist) * rot
             end
         end
+        if S.ball and S.ball.vr then headCF, camBack = S.ballVRView(headCF, camBack, rot) end
         cam.CFrame = headCF
 
         if Input then
@@ -3242,6 +4338,11 @@ task.spawn(function()
         detect = "Held object", -- "Held object" (needs an item near the hand) | "Grip only" (any closed fist)
         radius = 4,             -- how close (studs) an item must be to the hand to count as held
         always = false,         -- show even when not holding anything (aims from the hand)
+        aimbot = false,         -- the held gun steers toward the nearest player inside the aim cone
+        abFov = 20,             -- aim cone in degrees around where the gun points
+        abSmooth = 30,          -- aim speed in percent (low = gentle, high = snaps)
+        abKey = "Always",       -- Always | Hold right mouse | Hold shift
+        abPart = "Head",        -- Head | Body
         dirty = true,
     }
     local XH_DEFAULTS = {}
@@ -3563,8 +4664,88 @@ task.spawn(function()
             return best
         end
 
+        -- AIMBOT: turns the hand (aim angles of the emulator hand) until the gun points at the target. It learns how the hand turns the aim
+        -- first (a short wiggle), then steers; everything is measured in camera space, so turning the camera does not confuse it.
+        local abSt = {}
+        local abParams = RaycastParams.new()
+        abParams.FilterType = Enum.RaycastFilterType.Exclude
+        local function abTarget(origin, dir)
+            local best, bestA = nil, math.rad(XH.abFov)
+            for _, pl in ipairs(game:GetService("Players"):GetPlayers()) do
+                local ch = pl ~= lp and pl.Character
+                local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 then
+                    local tp = XH.abPart == "Head" and (ch:FindFirstChild("Head") or ch:FindFirstChild("HumanoidRootPart")) or (ch:FindFirstChild("HumanoidRootPart") or ch:FindFirstChild("Head"))
+                    if tp then
+                        local to = tp.Position - origin
+                        if to.Magnitude > 0.5 then
+                            local a = math.acos(math.clamp(dir:Dot(to.Unit), -1, 1))
+                            if a < bestA then
+                                abParams.FilterDescendantsInstances = { rig, lp.Character, ch }
+                                local blocked = workspace:Raycast(origin, to, abParams)
+                                if not blocked then best, bestA = tp.Position, a end
+                            end
+                        end
+                    end
+                end
+            end
+            return best
+        end
+        function S.abStep(side, cf, dir)
+            if not XH.aimbot or S.menuOpen or UIS:GetFocusedTextBox() then return end
+            if XH.abKey == "Hold right mouse" and not UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
+            if XH.abKey == "Hold shift" and not UIS:IsKeyDown(Enum.KeyCode.LeftShift) then return end
+            -- VR Emulator hands have their own aim angles; in the VR Hands game the hand gets an extra turn that only the aimbot uses
+            local A, yk, pk = S, side == "L" and "aimLYaw" or "aimRYaw", side == "L" and "aimLPitch" or "aimRPitch"
+            if not U.emu then A, yk, pk = U.ab[side], "y", "p" end
+            local st = abSt[side]
+            if not st then st = { phase = 0, bad = 0, lastErr = 1 } abSt[side] = st end
+            local now = os.clock()
+            local cc = cam.CFrame
+            local dl = cc:VectorToObjectSpace(dir)
+            local tgt = abTarget(cf.Position, dir)
+            if st.phase == 0 then
+                if not tgt then return end
+                st.y0, st.p0, st.d0, st.t, st.phase = A[yk], A[pk], dl, now, 1
+                A[yk] = S.wrapAng(st.y0 + 0.2)
+                return
+            elseif st.phase == 1 then
+                if now - st.t < 0.35 then return end
+                st.jY = (dl - st.d0) / 0.2
+                A[yk], A[pk], st.t, st.phase = st.y0, st.p0 + 0.2, now, 2
+                return
+            elseif st.phase == 2 then
+                if now - st.t < 0.35 then return end
+                st.jP = (dl - st.d0) / 0.2
+                A[pk], st.t, st.phase = st.p0, now, 3
+                return
+            elseif st.phase == 3 then
+                if now - st.t > 0.3 then st.phase = 4 end
+                return
+            end
+            if not tgt then return end
+            local want = cc:VectorToObjectSpace((tgt - cf.Position).Unit)
+            local err = want - dl
+            local em = err.Magnitude
+            if em > st.lastErr + 0.0004 then st.bad += 1 else st.bad = math.max(0, st.bad - 1) end
+            st.lastErr = em
+            if st.bad > 90 then st.phase, st.bad = 0, 0 return end   -- it is not getting closer: learn the hand again
+            if em < 0.003 then return end
+            local jY, jP = st.jY, st.jP
+            local a, b, c = jY:Dot(jY), jY:Dot(jP), jP:Dot(jP)
+            local det = a * c - b * b
+            if det < 1e-5 then st.phase = 0 return end
+            local r1, r2 = jY:Dot(err), jP:Dot(err)
+            local k = math.clamp(XH.abSmooth / 100, 0.05, 1) * 0.5
+            local dy = math.clamp((c * r1 - b * r2) / det * k, -0.12, 0.12)
+            local dp = math.clamp((a * r2 - b * r1) / det * k, -0.12, 0.12)
+            A[yk] = S.wrapAng(A[yk] + dy)
+            A[pk] = math.clamp(A[pk] + dp, -1.45, 1.45)
+        end
+
         U.bind("NoVR_Crosshair", Enum.RenderPriority.Camera.Value + 2, function()
             if XH.dirty then rebuild() end
+            if not XH.aimbot and not U.emu then for _, s2 in pairs(U.ab) do s2.y, s2.p = 0, 0 end end
             local doScan = os.clock() - lastScan > 0.1
             if doScan then lastScan = os.clock() end
             local tool = lp.Character and lp.Character:FindFirstChildOfClass("Tool")
@@ -3598,6 +4779,7 @@ task.spawn(function()
 
                         if ok then
                             local dir = AXES[XH.axis](cf)
+                            if XH.aimbot then pcall(S.abStep, side, cf, dir) end
                             local ex = { rig }
                             if cloneFolder then ex[#ex + 1] = cloneFolder end
                             if lp.Character then ex[#ex + 1] = lp.Character end
@@ -6400,7 +7582,7 @@ task.spawn(function()
             -- while it is open closes it (toggle).
             local function overlay(slot, x, y, w, h, name, title)
                 local cascade = 0
-                for _, other in ipairs({ "controls", "settings", "crosshair", "teleport", "profile", "servers", "roblox", "search", "gesture", "emu", "people", "accounts", "chat", "owner", "live", "req", "mic", "keys" }) do
+                for _, other in ipairs({ "controls", "settings", "crosshair", "teleport", "profile", "servers", "roblox", "search", "gesture", "emu", "people", "accounts", "chat", "owner", "live", "req", "mic", "keys", "spec", "ball", "esp" }) do
                     if other ~= slot and me[other] and not me[other].closed then
                         cascade = cascade + 1   -- windows stay open side by side: each new one is offset a little
                     end
@@ -7045,7 +8227,7 @@ task.spawn(function()
                 sc.BackgroundTransparency = 1
                 sc.BorderSizePixel = 0
                 sc.ScrollBarThickness = 4
-                sc.CanvasSize = UDim2.fromOffset(0, 730)
+                sc.CanvasSize = UDim2.fromOffset(0, 950)
                 sc.ScrollingDirection = Enum.ScrollingDirection.Y
                 sc.Parent = p
 
@@ -7074,7 +8256,10 @@ task.spawn(function()
                     local b = pill(y, 64)
                     local function refresh()
                         b.Text = XH[key] and "ON" or "OFF"
-                        b.BackgroundTransparency = XH[key] and 0.1 or 0.8
+                        b.BackgroundTransparency = XH[key] and 0.2 or 0.8
+                        b.BackgroundColor3 = XH[key] and Color3.fromRGB(40, 170, 105) or PINK
+                        b.TextColor3 = XH[key] and Color3.fromRGB(150, 255, 190) or WHITE
+                        b:SetAttribute("tc", XH[key] and true or nil)
                     end
                     refresh()
                     b.Activated:Connect(function()
@@ -7152,9 +8337,14 @@ task.spawn(function()
                 sld(578, "Held-object reach (studs)", 1, 30, function() return XH.radius end,
                     function(v) XH.radius = v end, plain)
                 tgl(634, "Always show (aim from hand)", "always")
+                tgl(670, "Aimbot (gun aims at players)", "aimbot")
+                choice(706, "Aimbot active", "abKey", { "Always", "Hold right mouse", "Hold shift" })
+                choice(742, "Aim at", "abPart", { "Head", "Body" })
+                sld(778, "Aim cone (degrees)", 5, 90, function() return XH.abFov end, function(v) XH.abFov = v end, plain)
+                sld(834, "Aim speed (%)", 5, 100, function() return XH.abSmooth end, function(v) XH.abSmooth = v end, plain)
 
                 local rb = Instance.new("TextButton")
-                rb.Position = UDim2.fromOffset(10, 676)
+                rb.Position = UDim2.fromOffset(10, 900)
                 rb.Size = UDim2.fromOffset(362, 34)
                 rb.AutoButtonColor = false
                 rb.BackgroundColor3 = PINK
@@ -12787,32 +13977,110 @@ task.spawn(function()
                 if m then pcall(function() m.Volume = Mic.gain end) end
                 return m ~= nil
             end
-            function Mic.setMonitor(on)   -- hear your own mic through your speakers / headphones (local only, nobody else hears this)
-                if on then
-                    local m = Mic.find()
-                    if not m then return false end
-                    if not (Mic.mon and Mic.mon.Parent) then
-                        local ok = pcall(function()
-                            local f = Instance.new("AudioFader")
-                            f.Name = "NoVR_MonFader"
-                            f.Volume = 1
-                            f.Parent = lp
-                            local o = Instance.new("AudioDeviceOutput")
-                            o.Name = "NoVR_MonOut"
-                            o.Parent = lp
-                            local w1 = Instance.new("Wire")
-                            w1.SourceInstance = m
-                            w1.TargetInstance = f
-                            w1.Parent = f
-                            local w2 = Instance.new("Wire")
-                            w2.SourceInstance = f
-                            w2.TargetInstance = o
-                            w2.Parent = o
+            -- where the playback / meter pieces live: out of the Player object first (games with an anti voice-chat-tool script watch that), then other places
+            function Mic.parents()
+                local list = {}
+                pcall(function() if gethui then local h = gethui(); if h then list[#list + 1] = h end end end)
+                list[#list + 1] = game:GetService("SoundService")
+                pcall(function() list[#list + 1] = game:GetService("CoreGui") end)
+                pcall(function() if workspace.CurrentCamera then list[#list + 1] = workspace.CurrentCamera end end)
+                list[#list + 1] = lp
+                return list
+            end
+            function Mic.scanAnti()   -- looks for anti voice-chat-tool scripts / objects (names with "vcb" or "anti vc")
+                local hits = {}
+                local function chk(n)
+                    local l = string.lower(n)
+                    return string.find(l, "vcb", 1, true) ~= nil or string.find(l, "antivc", 1, true) ~= nil or string.find(l, "anti_vc", 1, true) ~= nil
+                end
+                local n = 0
+                for _, d in ipairs(game:GetDescendants()) do
+                    n = n + 1
+                    if n > 60000 then break end
+                    if chk(d.Name) then hits[#hits + 1] = d:GetFullName(); if #hits >= 4 then break end end
+                end
+                pcall(function()
+                    local gs = (getgenv and getgenv().getscripts) or _G.getscripts
+                    if gs then
+                        for _, s in ipairs(gs()) do
+                            if chk(s.Name) then hits[#hits + 1] = s:GetFullName() end
+                        end
+                    end
+                end)
+                return hits
+            end
+            local function micGuid() return game:GetService("HttpService"):GenerateGUID(false) end
+            local function monBuild(parent, m)
+                local f = Instance.new("AudioFader")
+                f.Name = micGuid()
+                f.Volume = 1
+                f.Parent = parent
+                local o = Instance.new("AudioDeviceOutput")
+                o.Name = micGuid()
+                o.Parent = parent
+                local w1 = Instance.new("Wire")
+                w1.Name = micGuid()
+                w1.SourceInstance = m
+                w1.TargetInstance = f
+                w1.Parent = f
+                local w2 = Instance.new("Wire")
+                w2.Name = micGuid()
+                w2.SourceInstance = f
+                w2.TargetInstance = o
+                w2.Parent = o
+                return f, o
+            end
+            local function monAlive() return Mic.mon and Mic.mon.Parent and Mic.monOut and Mic.monOut.Parent end
+            local function monTry()   -- builds the playback in the first place that survives; returns ok
+                local m = Mic.find()
+                if not m then return false end
+                local order = Mic.parents()
+                if Mic.monGoodIdx then table.insert(order, 1, order[Mic.monGoodIdx]) end
+                for i, parent in ipairs(order) do
+                    local ok, f, o = pcall(monBuild, parent, m)
+                    if ok and f then
+                        task.wait(0.8)   -- a game that removes these pieces does it right away
+                        if f.Parent and o.Parent and m.Parent then
                             Mic.mon, Mic.monOut = f, o
-                        end)
-                        if not ok then return false end
+                            Mic.monGoodIdx = nil
+                            return true
+                        end
+                        pcall(function() f:Destroy() end)
+                        pcall(function() o:Destroy() end)
+                    end
+                end
+                return false
+            end
+            function Mic.setMonitor(on)   -- hear your own mic through your speakers / headphones (local only, nobody else hears this). Returns ok, message
+                if on then
+                    if not Mic.find() then return false, "No mic control in this game, so there is nothing to play back." end
+                    if not monAlive() then
+                        if not monTry() then
+                            local hits = Mic.scanAnti()
+                            if #hits > 0 then
+                                return false, "The game removes the playback pieces (anti voice-chat tool found: " .. hits[1] .. ")."
+                            end
+                            return false, "The game removed the playback pieces every time I put them somewhere."
+                        end
                     end
                     Mic.monitorOn = true
+                    if not Mic.monWatch then   -- if the game removes them later, they are put back (a few tries, then it stops and says so)
+                        Mic.monWatch = true
+                        task.spawn(function()
+                            local fails = 0
+                            while true do
+                                task.wait(1)
+                                if Mic.monitorOn and not monAlive() then
+                                    if monTry() then fails = fails + 1 end
+                                    if not monAlive() or fails > 6 then
+                                        Mic.monitorOn = false
+                                        Mic.monNote = "The game keeps removing the playback, so Hear myself was turned off."
+                                        fails = 0
+                                    end
+                                end
+                            end
+                        end)
+                    end
                 else
                     Mic.monitorOn = false
                     pcall(function() if Mic.mon then Mic.mon:Destroy() end end)
@@ -12827,9 +14095,10 @@ task.spawn(function()
                 if not (Mic.analyzer and Mic.analyzer.Parent) then
                     pcall(function()
                         local an = Instance.new("AudioAnalyzer")
-                        an.Name = "NoVR_MicMeter"
-                        an.Parent = lp
+                        an.Name = micGuid()
+                        an.Parent = Mic.parents()[1]
                         local w = Instance.new("Wire")
+                        w.Name = micGuid()
                         w.SourceInstance = m
                         w.TargetInstance = an
                         w.Parent = an
@@ -12990,6 +14259,9 @@ task.spawn(function()
                 corner(box2, 14)
                 lbl(box2, "Hear myself", 14, 10, 220, 16, 12, WHITE, Enum.Font.GothamBold)
                 local monSub = lbl(box2, "Plays your mic back to you. Use headphones or it echoes.", 14, 30, 290, 14, 9, MUTED, Enum.Font.GothamMedium)
+                monSub.Size = UDim2.fromOffset(290, 24)
+                monSub.TextWrapped = true
+                monSub.TextYAlignment = Enum.TextYAlignment.Top
                 local trk2 = Instance.new("TextButton")
                 trk2.AnchorPoint = Vector2.new(1, 0.5)
                 trk2.Position = UDim2.new(1, -14, 0.5, 0)
@@ -13024,9 +14296,10 @@ task.spawn(function()
                 end
                 paint2(false)
                 trk2.Activated:Connect(function()
-                    local ok = Mic.setMonitor(not Mic.monitorOn)
+                    monSub.Text = "Working..."
+                    local ok, why = Mic.setMonitor(not Mic.monitorOn)
                     if not ok then
-                        monSub.Text = "No mic control in this game, so there is nothing to play back."
+                        monSub.Text = why or "Could not start the playback."
                     else
                         monSub.Text = "Plays your mic back to you. Use headphones or it echoes."
                     end
@@ -13039,6 +14312,7 @@ task.spawn(function()
                 -- live readout
                 task.spawn(function()
                     while p.Parent and not ent.closed do
+                        if Mic.monNote then monSub.Text = Mic.monNote; Mic.monNote = nil; paint2(true) end
                         local m = Mic.find()
                         if m then
                             statL.Text = "Mic control found" .. (m.Muted and "  |  muted" or "")
@@ -13149,6 +14423,275 @@ task.spawn(function()
                 Theme.recolor(p)
             end
             S.ovl.keys = openKeys
+
+            -- ===== SPECTATE window =====
+            S.platOf = function(userId)
+                local e = hudApi.Chat and hudApi.Chat.live and hudApi.Chat.live[userId]
+                return e and e.plat or nil
+            end
+            local function openSpec()
+                local p, ent = overlay("spec", 90, 14, 380, 540, "Spectate", "Spectate players")
+                if not p then return end
+                local PlayersU = game:GetService("Players")
+                local statL = lbl(p, "", 22, 50, 336, 14, 10, MUTED, Enum.Font.GothamMedium)
+                local function pill(x, y, w, text, fn)
+                    local b = Instance.new("TextButton")
+                    b.Position = UDim2.fromOffset(x, y)
+                    b.Size = UDim2.fromOffset(w, 30)
+                    b.AutoButtonColor = false
+                    b.BackgroundColor3 = Color3.new(1, 1, 1)
+                    b.BackgroundTransparency = 0.88
+                    b.BorderSizePixel = 0
+                    b.Text = text
+                    b.Font = Enum.Font.GothamBold
+                    b.TextSize = 10
+                    b.TextColor3 = WHITE
+                    b.ZIndex = 5
+                    b.Parent = p
+                    corner(b, 10)
+                    b.Activated:Connect(fn)
+                    return b
+                end
+                pill(22, 72, 40, "<", function() S.specStep(-1) end)
+                pill(66, 72, 40, ">", function() S.specStep(1) end)
+                local modeB = pill(110, 72, 96, "VIEW: BEHIND", function()
+                    if not S.spec then return end
+                    local order = { Behind = "Front", Front = "First", First = "Behind" }
+                    S.spec.mode = order[S.spec.mode] or "Behind"
+                end)
+                pill(210, 72, 34, "-", function() if S.spec then S.spec.dist = math.max(2, S.spec.dist - 1.5) end end)
+                pill(248, 72, 34, "+", function() if S.spec then S.spec.dist = math.min(40, S.spec.dist + 1.5) end end)
+                pill(286, 72, 72, "STOP", function() S.specStop() end)
+                -- tabs: All / VR / PC / Mobile / Other
+                local tab = "All"
+                local TABS = { "All", "VR", "PC", "Mobile", "Other" }
+                local tabBtns = {}
+                local function paintTabs()
+                    for n, b in pairs(tabBtns) do
+                        b.BackgroundTransparency = (n == tab) and 0.55 or 0.9
+                    end
+                end
+                for i, n in ipairs(TABS) do
+                    local b = Instance.new("TextButton")
+                    b.Position = UDim2.fromOffset(22 + (i - 1) * 68, 112)
+                    b.Size = UDim2.fromOffset(62, 26)
+                    b.AutoButtonColor = false
+                    b.BackgroundColor3 = Color3.new(1, 1, 1)
+                    b.BorderSizePixel = 0
+                    b.Text = n
+                    b.Font = Enum.Font.GothamBold
+                    b.TextSize = 10
+                    b.TextColor3 = WHITE
+                    b.ZIndex = 5
+                    b.Parent = p
+                    corner(b, 9)
+                    tabBtns[n] = b
+                    b.Activated:Connect(function() tab = n; paintTabs() end)
+                end
+                paintTabs()
+                local note2 = lbl(p, "PC / Mobile are known for people who also run this script; everyone else is Other.", 22, 142, 336, 24, 9, MUTED, Enum.Font.GothamMedium)
+                note2.TextWrapped = true
+                note2.TextYAlignment = Enum.TextYAlignment.Top
+                local sf = Instance.new("ScrollingFrame")
+                sf.Position = UDim2.fromOffset(22, 172)
+                sf.Size = UDim2.fromOffset(336, 340)
+                sf.BackgroundTransparency = 1
+                sf.BorderSizePixel = 0
+                sf.ScrollBarThickness = 4
+                sf.CanvasSize = UDim2.new()
+                sf.AutomaticCanvasSize = Enum.AutomaticSize.Y
+                sf.ScrollingDirection = Enum.ScrollingDirection.Y
+                sf.ZIndex = 3
+                sf.Parent = p
+                local ll = Instance.new("UIListLayout")
+                ll.Padding = UDim.new(0, 6)
+                ll.Parent = sf
+                ent.stretchAdd(sf, 1, 1)
+                local rows = {}
+                local function rebuild()
+                    for _, r in pairs(rows) do r:Destroy() end
+                    rows = {}
+                    local shown = 0
+                    for i, pl in ipairs(S.specList()) do
+                      local kind = S.specKind(pl)
+                      if tab == "All" or tab == kind then
+                        shown = shown + 1
+                        local b = Instance.new("TextButton")
+                        b.Size = UDim2.new(1, -8, 0, 36)
+                        b.AutoButtonColor = false
+                        b.BackgroundColor3 = Color3.new(1, 1, 1)
+                        b.BackgroundTransparency = (S.spec and S.spec.plr == pl) and 0.7 or 0.9
+                        b.BorderSizePixel = 0
+                        b.Text = "  " .. pl.DisplayName .. "   @" .. pl.Name .. "    [" .. kind .. "]"
+                        b.TextXAlignment = Enum.TextXAlignment.Left
+                        b.Font = Enum.Font.GothamMedium
+                        b.TextSize = 12
+                        b.TextColor3 = WHITE
+                        b.LayoutOrder = i
+                        b.ZIndex = 4
+                        b.Parent = sf
+                        corner(b, 10)
+                        b.Activated:Connect(function() S.specStart(pl) end)
+                        rows[#rows + 1] = b
+                      end
+                    end
+                    if shown == 0 then
+                        local e = Instance.new("TextLabel")
+                        e.Size = UDim2.new(1, -8, 0, 30)
+                        e.BackgroundTransparency = 1
+                        e.Text = "Nobody in this tab right now."
+                        e.Font = Enum.Font.GothamMedium
+                        e.TextSize = 11
+                        e.TextColor3 = MUTED
+                        e.ZIndex = 4
+                        e.Parent = sf
+                        rows[#rows + 1] = e
+                    end
+                end
+                local lastSig = ""
+                task.spawn(function()
+                    while p.Parent and not ent.closed do
+                        local parts = { tab, S.spec and tostring(S.spec.plr.UserId) or "-" }
+                        for _, pl in ipairs(S.specList()) do parts[#parts + 1] = pl.UserId .. S.specKind(pl) end
+                        local sig = table.concat(parts, ",")
+                        if sig ~= lastSig then lastSig = sig; rebuild() end
+                        if S.spec then
+                            statL.Text = "Watching " .. S.spec.plr.DisplayName .. "  -  view: " .. S.spec.mode
+                            modeB.Text = "VIEW: " .. string.upper(S.spec.mode)
+                        else
+                            statL.Text = "Pick a player to watch. STOP brings you back."
+                            modeB.Text = "VIEW: BEHIND"
+                        end
+                        task.wait(0.4)
+                    end
+                end)
+                Theme.recolor(p)
+            end
+            S.ovl.spec = openSpec
+
+            -- ===== BOUNCY BALL window =====
+            local function openBall()
+                local p, ent = overlay("ball", 100, 14, 380, 500, "Ball", "Bouncy ball")
+                if not p then return end
+                lbl(p, "Your VR rig (your avatar in Emulator mode) becomes a bouncy ball. WASD rolls, Space hops, hold the left mouse button and let go to THROW yourself. E attaches to the object you look at, so whoever grabs it carries you.", 22, 48, 336, 40, 10, MUTED, Enum.Font.GothamMedium).TextWrapped = true
+                local tb = Instance.new("TextButton")
+                tb.Position = UDim2.fromOffset(22, 96)
+                tb.Size = UDim2.fromOffset(336, 36)
+                tb.AutoButtonColor = false
+                tb.BackgroundColor3 = Color3.new(1, 1, 1)
+                tb.BackgroundTransparency = 0.8
+                tb.BorderSizePixel = 0
+                tb.Font = Enum.Font.GothamBold
+                tb.TextSize = 12
+                tb.TextColor3 = WHITE
+                tb.ZIndex = 5
+                tb.Parent = p
+                corner(tb, 12)
+                tb.Activated:Connect(function()
+                    if S.ball then S.ballStop() else S.ballStart() end
+                end)
+                local function pill2(y, text, fn)
+                    local b2 = Instance.new("TextButton")
+                    b2.Position = UDim2.fromOffset(22, y)
+                    b2.Size = UDim2.fromOffset(336, 32)
+                    b2.AutoButtonColor = false
+                    b2.BackgroundColor3 = Color3.new(1, 1, 1)
+                    b2.BackgroundTransparency = 0.88
+                    b2.BorderSizePixel = 0
+                    b2.Text = text
+                    b2.Font = Enum.Font.GothamBold
+                    b2.TextSize = 10
+                    b2.TextColor3 = WHITE
+                    b2.ZIndex = 5
+                    b2.Parent = p
+                    corner(b2, 11)
+                    b2.Activated:Connect(fn)
+                end
+                pill2(142, "GET PICKED UP BY THE NEAREST PLAYER", function() S.ballAttach("player") end)
+                pill2(180, "ATTACH TO WHAT I'M LOOKING AT  (E)", function() S.ballAttach("aim") end)
+                pill2(218, "LET GO  (E)", function() S.ballDetach(Vector3.new(0, 10, 0)) end)
+                local function slider(y, label, lo, hi, key, fmt)
+                    lbl(p, label, 22, y, 200, 16, 12, WHITE, Enum.Font.GothamBold)
+                    local vl = lbl(p, "", 258, y, 100, 16, 12, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Right)
+                    local function show() vl.Text = string.format(fmt, S.ballCfg[key]) end
+                    show()
+                    hslider(p, 22, y + 34, 336, (S.ballCfg[key] - lo) / (hi - lo), false, function(f)
+                        S.ballCfg[key] = lo + (hi - lo) * f
+                        show()
+                        S.ballApplyCfg()
+                    end)
+                end
+                slider(266, "Bounciness", 0.2, 1, "bounce", "%.2f")
+                slider(328, "Ball size", 2, 9, "size", "%.1f")
+                slider(390, "Roll strength", 10, 90, "push", "%.0f")
+                task.spawn(function()
+                    while p.Parent and not ent.closed do
+                        tb.Text = S.ball and "TURN BALL OFF" or "TURN BALL ON"
+                        task.wait(0.3)
+                    end
+                end)
+                Theme.recolor(p)
+            end
+            S.ovl.ball = openBall
+
+            -- ===== ESP window =====
+            local function openEsp()
+                local p, ent = overlay("esp", 90, 14, 320, 360, "ESP", "See players through walls")
+                if not p then return end
+                local note = lbl(p, "VR = purple   PC = blue   Mobile = green   Other = white", 22, 50, 276, 14, 10, MUTED, Enum.Font.GothamMedium)
+                local btns = {}
+                local function pill(y, fn)
+                    local b = Instance.new("TextButton")
+                    b.Position = UDim2.fromOffset(22, y)
+                    b.Size = UDim2.fromOffset(276, 32)
+                    b.AutoButtonColor = false
+                    b.BackgroundColor3 = Color3.new(1, 1, 1)
+                    b.BackgroundTransparency = 0.88
+                    b.BorderSizePixel = 0
+                    b.Font = Enum.Font.GothamBold
+                    b.TextSize = 11
+                    b.TextColor3 = WHITE
+                    b.ZIndex = 5
+                    b.Parent = p
+                    corner(b, 10)
+                    b.Activated:Connect(fn)
+                    return b
+                end
+                local function onoff(v) return v and "ON" or "OFF" end
+                local master = pill(76, function() S.espSet(not S.esp.on) end)
+                local rows = { { "VR players", "VR" }, { "PC players", "PC" }, { "Mobile players", "Mobile" }, { "Other players", "Other" } }
+                for i, r in ipairs(rows) do
+                    btns[r[2]] = pill(76 + 40 * i, function() S.esp.kinds[r[2]] = not S.esp.kinds[r[2]] end)
+                end
+                local nm = pill(76 + 40 * 5, function() S.esp.names = not S.esp.names end)
+                local stat = lbl(p, "", 22, 76 + 40 * 5 + 40, 276, 28, 10, MUTED, Enum.Font.GothamMedium)
+                local function paintP(b, on)
+                    b.BackgroundColor3 = on and Color3.fromRGB(40, 170, 105) or Color3.new(1, 1, 1)
+                    b.BackgroundTransparency = on and 0.35 or 0.88
+                    b.TextColor3 = on and Color3.fromRGB(150, 255, 190) or WHITE
+                    b:SetAttribute("tc", true)
+                end
+                local function refresh()
+                    paintP(master, S.esp.on)
+                    for _, r in ipairs(rows) do paintP(btns[r[2]], S.esp.kinds[r[2]]) end
+                    paintP(nm, S.esp.names)
+                    master.Text = "ESP: " .. onoff(S.esp.on)
+                    for i, r in ipairs(rows) do btns[r[2]].Text = r[1] .. ": " .. onoff(S.esp.kinds[r[2]]) end
+                    nm.Text = "Name + distance tags: " .. onoff(S.esp.names)
+                    local n = 0
+                    for _ in pairs(S.esp.items) do n += 1 end
+                    stat.Text = S.esp.lastErr and ("Problem: " .. S.esp.lastErr:sub(1, 80)) or (S.esp.on and ("Showing " .. n .. " player(s)") or "Turn ESP on to show players.")
+                end
+                task.spawn(function()
+                    while p.Parent and not ent.closed do
+                        refresh()
+                        task.wait(0.3)
+                    end
+                end)
+                refresh()
+                Theme.recolor(p)
+            end
+            S.ovl.esp = openEsp
 
             -- ===== REQUIREMENTS window: what your executor has to allow for each feature to show and work =====
             local function reqChecks()
@@ -13456,15 +14999,12 @@ task.spawn(function()
                 -- MENUS: every page
                 add({ name = "Fix Controls", sec = "Quick", sub = "Hands gone or keys dead? Tap this", badge = "RUN", fn = function()
                     local msg = "Nothing was stuck."
-                    if U.setAvatar and U.normal then U.setAvatar(false); msg = "Normal Avatar was ON - switched back to the VR rig." end
                     pcall(function()
                         local tb = UIS:GetFocusedTextBox()
                         if tb then tb:ReleaseFocus(); msg = "A text box was grabbing your keys - released." end
                     end)
                     pcall(function() game:GetService("StarterGui"):SetCore("SendNotification", { Title = "Fix Controls", Text = msg, Duration = 3 }) end)
                 end })
-                add({ name = "Normal Avatar", sec = "Quick", sub = "Walk as your normal avatar (F7)", get = onoff(function() return U.normal == true end),
-                      fn = function() if U.setAvatar then U.setAvatar(not U.normal) end end })
                 add({ name = "Arrange Windows", sec = "Quick", sub = "Tidy every open window so none overlap", badge = "RUN", fn = function()
                     local v = cam.ViewportSize
                     local kf = math.max(fit.Scale, 0.01)
@@ -13511,6 +15051,14 @@ task.spawn(function()
                 page("My Profile", "Your Roblox profile", openProfile)
                 add({ name = "Mic & Piano", sec = "Menus", sub = "Mic level, presets, auto-level", badge = "OPEN", fn = openMic })
                 add({ name = "Keybinds", sec = "Controls", sub = "Change any key", badge = "OPEN", fn = openKeys })
+                add({ name = "Bouncy Ball", sec = "Quick", sub = "Your VR rig bounces and rolls", get = onoff(function() return S.ball ~= nil end), fn = function() if S.ball then S.ballStop() else S.ballStart() end end })
+                add({ name = "Ball Settings", sec = "Menus", sub = "Bounce, size, roll strength", badge = "OPEN", fn = openBall })
+                add({ name = "ESP", sec = "Social", sub = "See VR / PC / Mobile players through walls", badge = "OPEN", fn = openEsp })
+                add({ name = "Character Desync", sec = "Quick", sub = "Others see you frozen, you move freely (raknet)", get = onoff(function() return S.desync and S.desync.on end), fn = function() if S.desyncSet then S.desyncSet(not S.desync.on) end end })
+                add({ name = "ESP On/Off", sec = "Quick", sub = "Toggle player ESP", get = onoff(function() return S.esp and S.esp.on end), fn = function() if S.espSet then S.espSet(not S.esp.on) end end })
+                add({ name = "Spectate", sec = "Social", sub = "Watch another player", get = function() return S.spec and "WATCHING" or "OPEN", S.spec ~= nil end, fn = openSpec })
+                add({ name = "Stop Spectating", sec = "Social", sub = "Back to your own view", badge = "RUN", fn = function() if S.specStop then S.specStop() end end })
+                add({ name = "Spectate: talk to them", sec = "Social", sub = "Your body slips into theirs so they hear you", get = onoff(function() return S.specTalk end), fn = function() S.specTalk = not S.specTalk end })
                 add({ name = "Wave palm: flip", sec = "Quick", sub = "Turns the waving hand around, then waves", badge = "FLIP", fn = function()
                     S.wavePalm = -(S.wavePalm or 1)
                     if S.waveHi then S.waveHi() end
@@ -15349,7 +16897,7 @@ task.spawn(function()
         end
         -- ----- Live users: who is running the script right now (asked on demand, answered only by people who opted in) -----
         function Chat.presence()
-            local rec = { k = "p", v = 1, u = lp.UserId, n = lp.Name, d = lp.DisplayName, pid = game.PlaceId, g = Chat.gameName or "", ts = os.time() }
+            local rec = { k = "p", v = 1, u = lp.UserId, n = lp.Name, d = lp.DisplayName, pid = game.PlaceId, g = Chat.gameName or "", ts = os.time(), plat = IS_MOBILE and "Mobile" or "PC" }
             if game.PrivateServerId == "" then rec.j = game.JobId end   -- the server id is only sent if you allowed joining
             return rec
         end
@@ -15407,7 +16955,7 @@ task.spawn(function()
                 if (fresh or (age <= 720 and age >= -720)) and m.u ~= lp.UserId and not Chat.blocked[m.u] then
                     Chat.dbg.p = Chat.dbg.p + 1
                     Chat.live[m.u] = { u = m.u, n = cleanText(m.n, 24), d = cleanText(m.d ~= nil and m.d or m.n, 32), pid = tonumber(m.pid), g = cleanText(m.g or "", 40),
-                                       j = (type(m.j) == "string" and #m.j > 10 and #m.j < 60) and m.j or nil, seen = os.time() - math.max(0, math.min(age, 600)) }
+                                       plat = (m.plat == "Mobile" or m.plat == "PC") and m.plat or nil, j = (type(m.j) == "string" and #m.j > 10 and #m.j < 60) and m.j or nil, seen = os.time() - math.max(0, math.min(age, 600)) }
                     for _, f in ipairs(Chat.liveListeners) do pcall(f) end
                 end
             elseif m.k == "c" then
