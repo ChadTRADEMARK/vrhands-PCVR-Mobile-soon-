@@ -3959,6 +3959,18 @@ task.spawn(function()
                 if c.Name == uid then task.spawn(adopt, c) end
             end)
         end
+        -- a quick fingerprint of the rig's look, so a refreshed rig (same model, new parts) is noticed too
+        local function rigSig(r)
+            if not (r and r.Parent) then return "gone" end
+            local n, h = 0, 0
+            for _, d in ipairs(r:GetDescendants()) do
+                n += 1
+                local s = d.Name
+                if d:IsA("MeshPart") then s = s .. d.MeshId .. d.TextureID elseif d:IsA("SpecialMesh") then s = s .. d.MeshId .. d.TextureId end
+                h = (h + #s * 31 + n) % 1000003
+            end
+            return n .. ":" .. h
+        end
         -- VR Hands can run with NO normal character: then the game's own remotes are the only way to ask for a new rig
         local function viaRemote(auto)
             local rs = game:GetService("ReplicatedStorage")
@@ -4010,21 +4022,21 @@ task.spawn(function()
             note(auto and "Your avatar changed - rebuilding the VR rig..." or "Rebuilding your VR rig with your current avatar...")
             hum.Health = 0   -- the game builds a fresh rig from your avatar when you respawn
             task.spawn(function()
+                local sig0 = rigSig(old)
                 local t0 = os.clock()
-                while os.clock() - t0 < 25 and (rig == old or not rig.Parent) do task.wait(0.2) end
-                if home then   -- back to where you were
-                    local t1 = os.clock()
-                    local h2
-                    repeat
-                        task.wait(0.2)
-                        local c2 = lp.Character
-                        h2 = c2 and c2 ~= ch and c2:FindFirstChild("HumanoidRootPart")
-                    until h2 or os.clock() - t1 > 12
-                    if h2 then h2.CFrame = home end
-                end
+                local h2
+                repeat   -- wait for the respawn, then put you back
+                    task.wait(0.2)
+                    local c2 = lp.Character
+                    h2 = c2 and c2 ~= ch and c2:FindFirstChild("HumanoidRootPart")
+                until h2 or os.clock() - t0 > 12
+                if h2 and home then h2.CFrame = home end
+                -- the game may build a new rig model OR refresh the same one: either counts as a reset
+                local t1 = os.clock()
+                while os.clock() - t1 < 6 and rig == old and rigSig(rig) == sig0 do task.wait(0.25) end
                 S.rigStamp = os.clock()
                 busy = false
-                note(rig ~= old and "VR rig rebuilt." or "The game did not make a new rig. Try again in a moment.")
+                note(h2 and "VR rig reset." or "The reset did not go through. Try again in a moment.")
             end)
         end
         -- watch for avatar changes (hats, clothes, body colours) on your character and rebuild the rig a moment after they stop
