@@ -50,7 +50,7 @@ local UPDATE_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR
 --   2.0.4 -> 2.0.5 ... 2.0.12 -> 2.1.0 ... 2.1.12 -> 2.2.0 ... 2.12.12 -> 3.0.0
 -- Your Discord/status feed ("version" in status.json) should use the same pattern, and the script
 -- compares versions as NUMBERS (so 2.0.12 is newer than 2.0.4, and 2.1.0 is newer than 2.0.12).
-local SCRIPT_VERSION = "2.1.5"
+local SCRIPT_VERSION = "2.1.7"
 -- Optional: RAW link to a small JSON file YOU host. It feeds the Banwave / Key system / Script rows.
 -- Leave "" to skip. Example file:
 --   { "banwave": "clear", "banwave_note": "No wave reported",
@@ -290,6 +290,260 @@ end)
 -- size: multiplier for the menus (0.6 .. 1.4)
 local Theme = { hue = 0, size = 1, listeners = {} }
 local BASE_HUE = 0.74   -- hue of the default violet menus
+
+-- ============ SEASONAL THEMES: the menus dress up for the holidays, starting 10 days before each one ============
+local function RGBc(r, g, b) return Color3.fromRGB(r, g, b) end
+local SEASONS = {
+    christmas = { name = "Christmas", short = "XMAS", hue = (1.00 - 0.74) * 360, wire = RGBc(18, 90, 40), c1 = "🎄", c2 = "❄", flakes = { "•", "❄", "•" }, flakeCol = RGBc(255, 255, 255),
+                  bulbs = { RGBc(235, 55, 55), RGBc(60, 200, 95), RGBc(255, 205, 70), RGBc(95, 165, 255) } },
+    halloween = { name = "Halloween", short = "SPOOKY", hue = (0.07 - 0.74) * 360, wire = RGBc(45, 28, 12), c1 = "🎃", c2 = "🦇", flakes = { "🦇", "•", "🍂" }, flakeCol = RGBc(255, 170, 60),
+                  bulbs = { RGBc(255, 140, 30), RGBc(160, 90, 230), RGBc(110, 220, 70), RGBc(255, 225, 120) } },
+    easter    = { name = "Easter", short = "EASTER", hue = (0.50 - 0.74) * 360, wire = RGBc(60, 130, 90), c1 = "🐣", c2 = "🥚", flakes = { "🌸", "•", "🌼" }, flakeCol = RGBc(255, 200, 225),
+                  bulbs = { RGBc(255, 160, 200), RGBc(255, 230, 120), RGBc(150, 235, 190), RGBc(200, 170, 255) } },
+    nye       = { name = "New Year's Eve", short = "NYE", hue = (0.62 - 0.74) * 360, wire = RGBc(40, 50, 90), c1 = "🥂", c2 = "✨", flakes = { "✦", "•", "✨" }, flakeCol = RGBc(255, 225, 140),
+                  bulbs = { RGBc(255, 205, 70), RGBc(225, 230, 240), RGBc(110, 160, 255), RGBc(255, 255, 255) } },
+    nyd       = { name = "New Year's Day", short = "NEW YEAR", hue = (0.12 - 0.74) * 360, wire = RGBc(90, 70, 20), c1 = "🎆", c2 = "🎉", flakes = { "✦", "•", "🎊" }, flakeCol = RGBc(255, 215, 90),
+                  bulbs = { RGBc(255, 205, 70), RGBc(255, 140, 60), RGBc(255, 255, 255), RGBc(255, 100, 190) } },
+}
+local SEASON_ORDER = { "christmas", "halloween", "easter", "nye", "nyd" }
+local Xmas = { cur = nil, th = nil, mode = "auto", bulbs = {}, flakes = {}, prevHue = nil }
+do
+    pcall(function()
+        if isfile and readfile and isfile("NoVR_season.txt") and readfile("NoVR_season.txt") == "off" then Xmas.mode = "off" end
+    end)
+end
+local function xmasSaveMode()
+    pcall(function() if writefile and (Xmas.mode == "off" or Xmas.mode == "auto") then writefile("NoVR_season.txt", Xmas.mode) end end)
+end
+-- Easter moves every year: this is the standard calendar rule for the date
+local function easterDate(Y)
+    local a, b, c = Y % 19, Y // 100, Y % 100
+    local d, e = b // 4, b % 4
+    local f = (b + 8) // 25
+    local g = (b - f + 1) // 3
+    local h = (19 * a + b - d - g + 15) % 30
+    local i, k = c // 4, c % 4
+    local l = (32 + 2 * e + 2 * i - h - k) % 7
+    local m = (a + 11 * h + 22 * l) // 451
+    local month = (h + l - 7 * m + 114) // 31
+    local day = ((h + l - 7 * m + 114) % 31) + 1
+    return month, day
+end
+local function xmasDayNum(y, m, d) return math.floor(os.time({ year = y, month = m, day = d, hour = 12 }) / 86400 + 0.5) end
+-- which holiday is within its 10-day run-up (or is today); the nearest one wins when two overlap
+function Xmas.today()
+    local t = os.date("*t")
+    local today = xmasDayNum(t.year, t.month, t.day)
+    local best, bestUntil, bestPri
+    local function consider(id, y, m, d, pri)
+        local u = xmasDayNum(y, m, d) - today
+        if u >= 0 and u <= 10 and (not best or u < bestUntil or (u == bestUntil and pri < bestPri)) then best, bestUntil, bestPri = id, u, pri end
+    end
+    for y = t.year, t.year + 1 do
+        consider("christmas", y, 12, 25, 1)
+        consider("halloween", y, 10, 31, 2)
+        consider("nye", y, 12, 31, 3)
+        consider("nyd", y, 1, 1, 4)
+        local em, ed = easterDate(y)
+        consider("easter", y, em, ed, 5)
+    end
+    return best, bestUntil
+end
+function Xmas.pick()
+    if Xmas.mode == "off" then return nil end
+    if Xmas.mode == "auto" then return (Xmas.today()) end
+    return SEASONS[Xmas.mode] and Xmas.mode or nil   -- a preview
+end
+function Xmas.undecorate(p)
+    for _, n in ipairs({ "XmasLights", "XmasCorners" }) do
+        local o = p and p:FindFirstChild(n)
+        if o then o:Destroy() end
+    end
+end
+function Xmas.decorate(ent)
+    local p, th = ent and ent.p, Xmas.th
+    if not p or not th or p:FindFirstChild("XmasLights") then return end
+    local f = Instance.new("Frame")
+    f.Name = "XmasLights"
+    f.Size = UDim2.new(1, -28, 0, 16)
+    f.Position = UDim2.fromOffset(14, -2)
+    f.BackgroundTransparency = 1
+    f.BorderSizePixel = 0
+    f.Active = false
+    f.ZIndex = 30
+    f:SetAttribute("tc", true)
+    local wire = Instance.new("Frame")
+    wire.Position = UDim2.fromOffset(0, 4)
+    wire.Size = UDim2.new(1, 0, 0, 2)
+    wire.BackgroundColor3 = th.wire
+    wire.BorderSizePixel = 0
+    wire.Active = false
+    wire.ZIndex = 30
+    wire:SetAttribute("tc", true)
+    wire.Parent = f
+    local N = 20
+    for i = 1, N do
+        local b = Instance.new("Frame")
+        b.Size = UDim2.fromOffset(7, 10)
+        b.AnchorPoint = Vector2.new(0.5, 0)
+        b.Position = UDim2.new((i - 1) / (N - 1), 0, 0, 5 + (i % 2) * 2)
+        b.BackgroundColor3 = th.bulbs[(i - 1) % #th.bulbs + 1]
+        b.BorderSizePixel = 0
+        b.Active = false
+        b.ZIndex = 31
+        b:SetAttribute("tc", true)
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(1, 0)
+        c.Parent = b
+        b.Parent = f
+        Xmas.bulbs[#Xmas.bulbs + 1] = { inst = b, ph = i % 2 }
+    end
+    f.Parent = p
+    local cn = Instance.new("Frame")
+    cn.Name = "XmasCorners"
+    cn.Size = UDim2.fromScale(1, 1)
+    cn.BackgroundTransparency = 1
+    cn.Active = false
+    cn.ZIndex = 30
+    cn:SetAttribute("tc", true)
+    local function mark(txt, ax, px)
+        local l = Instance.new("TextLabel")
+        l.BackgroundTransparency = 1
+        l.Text = txt
+        l.TextSize = 16
+        l.Font = Enum.Font.GothamBold
+        l.TextColor3 = Color3.fromRGB(255, 255, 255)
+        l.AnchorPoint = Vector2.new(ax, 1)
+        l.Position = UDim2.new(px, 0, 1, 0)
+        l.Size = UDim2.fromOffset(28, 24)
+        l.Active = false
+        l.ZIndex = 30
+        l:SetAttribute("tc", true)
+        l.Parent = cn
+    end
+    mark(th.c1, 1, 1)
+    mark(th.c2, 0, 0)
+    cn.Parent = p
+end
+function Xmas.refresh()
+    local list = Xmas.getPanels and Xmas.getPanels() or {}
+    for _, e in ipairs(list) do
+        if e.p then
+            Xmas.undecorate(e.p)
+            if Xmas.cur and e.p.Name ~= "Dock" and e.p.Name ~= "Panel" and e.p.Name ~= "Side" then Xmas.decorate(e) end
+        end
+    end
+end
+function Xmas.restyleSnow()
+    local th = Xmas.th
+    for i, f in ipairs(Xmas.flakes) do
+        if f.l.Parent and th then
+            f.l.Text = th.flakes[(i - 1) % #th.flakes + 1]
+            f.l.TextColor3 = th.flakeCol
+        end
+    end
+    if Xmas.snow then Xmas.snow.Visible = Xmas.cur ~= nil end
+end
+local function xmasNote(text)
+    pcall(function() game:GetService("StarterGui"):SetCore("SendNotification", { Title = "Seasonal theme", Text = text, Duration = 7 }) end)
+end
+local function isSeasonHue(h)
+    for _, s in pairs(SEASONS) do if math.abs(h - s.hue) < 0.5 then return true end end
+    return false
+end
+-- switches the look to whatever the date (or your setting) says; safe to call any time
+function Xmas.update(announce)
+    local id, left = Xmas.pick()
+    if id == Xmas.cur then return end
+    local old = Xmas.cur
+    Xmas.cur = id
+    Xmas.th = id and SEASONS[id] or nil
+    if id then
+        if not old then Xmas.prevHue = isSeasonHue(Theme.hue) and 0 or Theme.hue end
+        Theme.set(Xmas.th.hue)
+        if announce and Xmas.mode == "auto" then
+            xmasNote(Xmas.th.name .. " theme is on" .. ((left and left > 0) and (" (" .. left .. " days to go)") or "") .. ". Turn it off any time: menu > Seasonal Themes.")
+        end
+    else
+        Theme.set(Xmas.prevHue or 0)
+        Xmas.prevHue = nil
+    end
+    Xmas.refresh()
+    Xmas.restyleSnow()
+end
+-- bulbs twinkle, all windows at once
+task.spawn(function()
+    local ph = 0
+    while true do
+        task.wait(0.5)
+        ph = 1 - ph
+        for i = #Xmas.bulbs, 1, -1 do
+            local b = Xmas.bulbs[i]
+            if b.inst.Parent then
+                b.inst.BackgroundTransparency = (b.ph == ph) and 0.55 or 0
+            else
+                table.remove(Xmas.bulbs, i)
+            end
+        end
+    end
+end)
+-- the date check runs every minute, so the look changes by itself when the day comes
+task.spawn(function()
+    while true do
+        task.wait(60)
+        pcall(Xmas.update, true)
+    end
+end)
+-- falling flakes over the open menu
+function Xmas.attachSnow(gui)
+    local sn = Instance.new("Frame")
+    sn.Name = "XmasSnow"
+    sn.Size = UDim2.fromScale(1, 1)
+    sn.BackgroundTransparency = 1
+    sn.Active = false
+    sn.ZIndex = 60
+    sn.Visible = Xmas.cur ~= nil
+    sn:SetAttribute("tc", true)
+    sn.Parent = gui
+    Xmas.snow = sn
+    local flakes = {}
+    for i = 1, 38 do
+        local l = Instance.new("TextLabel")
+        l.BackgroundTransparency = 1
+        l.Text = "•"
+        l.TextColor3 = Color3.fromRGB(255, 255, 255)
+        l.TextSize = 9 + (i * 7) % 11
+        l.TextTransparency = 0.25 + ((i * 13) % 35) / 100
+        l.Font = Enum.Font.GothamBold
+        l.Size = UDim2.fromOffset(18, 18)
+        l.Active = false
+        l.ZIndex = 60
+        l:SetAttribute("tc", true)
+        l.Parent = sn
+        flakes[i] = { l = l, x = ((i * 37) % 100) / 100, y = ((i * 53) % 100) / 100, v = 0.05 + ((i * 17) % 10) / 100, s = (i % 5) + 1, t = i }
+    end
+    Xmas.flakes = flakes
+    Xmas.restyleSnow()
+    task.spawn(function()
+        local last = os.clock()
+        while sn.Parent do
+            task.wait(0.05)
+            local now = os.clock()
+            local dt = now - last
+            last = now
+            if sn.Visible ~= (Xmas.cur ~= nil) then sn.Visible = Xmas.cur ~= nil end
+            if Xmas.cur then
+                for _, f in ipairs(flakes) do
+                    f.y = f.y + f.v * dt
+                    f.t = f.t + dt
+                    if f.y > 1.03 then f.y = -0.03 f.x = math.random() end
+                    f.l.Position = UDim2.new(f.x + math.sin(f.t * 0.9) * 0.01 * f.s, 0, f.y, 0)
+                end
+            end
+        end
+    end)
+end
+
 
 -- shifts the hue of a colour (greys / whites are left alone)
 function Theme.tint(c)
@@ -3598,11 +3852,15 @@ task.spawn(function()
         return gl.raknet
     end
     local function dsDiag(rk)
-        if not (rk and writefile) then return end
+        if not rk then return end
         local names = {}
         for k, v in pairs(rk) do names[#names + 1] = tostring(k) .. " = " .. typeof(v) end
         table.sort(names)
-        pcall(writefile, "NoVR_raknet_diag.txt", "raknet functions in this executor:\n" .. table.concat(names, "\n"))
+        if writefile then pcall(writefile, "NoVR_raknet_diag.txt", "raknet functions in this executor:\n" .. table.concat(names, "\n")) end
+        local txt = "raknet functions: " .. table.concat(names, ", ")
+        print("[NoVR] " .. txt)   -- also in the developer console (F9)
+        local gl = (getgenv and getgenv()) or _G
+        if gl.setclipboard then pcall(gl.setclipboard, txt) end   -- and on your clipboard: just paste it into the chat
     end
     function S.desyncSet(on)
         local d = S.desync
@@ -3676,6 +3934,86 @@ task.spawn(function()
         end)
     end)
 
+    end
+
+    -- ===== RIG REFRESH: change your avatar, then rebuild the VR rig so it shows the new assets =====
+    S.rigAuto = true
+    S.rigStamp = os.clock()
+    do
+        local busy = false
+        local function note(text)
+            pcall(function() game:GetService("StarterGui"):SetCore("SendNotification", { Title = "VR Rig", Text = text, Duration = 3 }) end)
+        end
+        -- the game builds a NEW rig model whenever you respawn: adopt it, so every part of the script follows the new one instead of the dead one
+        local function adopt(nr)
+            if not nr or nr == rig then return end
+            nr:WaitForChild("VRHead", 20)
+            nr:WaitForChild("LeftHand", 20)
+            nr:WaitForChild("RightHand", 20)
+            rig = nr
+            scaleVal = nr:FindFirstChild("VRScale")
+            S.rigStamp = os.clock()
+        end
+        if not U.emu then
+            vrPlayers.ChildAdded:Connect(function(c)
+                if c.Name == uid then task.spawn(adopt, c) end
+            end)
+        end
+        function S.rigReset(auto)
+            if U.emu then note("Reset VR Rig is for the VR Hands game.") return end
+            if busy then return end
+            local ch = lp.Character
+            local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+            if not hum then note("No character to rebuild the rig from.") return end
+            busy = true
+            local home, old = hrp and hrp.CFrame, rig
+            note(auto and "Your avatar changed - rebuilding the VR rig..." or "Rebuilding your VR rig with your current avatar...")
+            hum.Health = 0   -- the game builds a fresh rig from your avatar when you respawn
+            task.spawn(function()
+                local t0 = os.clock()
+                while os.clock() - t0 < 25 and (rig == old or not rig.Parent) do task.wait(0.2) end
+                if home then   -- back to where you were
+                    local t1 = os.clock()
+                    local h2
+                    repeat
+                        task.wait(0.2)
+                        local c2 = lp.Character
+                        h2 = c2 and c2 ~= ch and c2:FindFirstChild("HumanoidRootPart")
+                    until h2 or os.clock() - t1 > 12
+                    if h2 then h2.CFrame = home end
+                end
+                S.rigStamp = os.clock()
+                busy = false
+                note(rig ~= old and "VR rig rebuilt." or "The game did not make a new rig. Try again in a moment.")
+            end)
+        end
+        -- watch for avatar changes (hats, clothes, body colours) on your character and rebuild the rig a moment after they stop
+        local function watch(ch)
+            local born = os.clock()
+            local function hit(d)
+                if not S.rigAuto or U.emu or busy then return end
+                if ch ~= lp.Character or not ch.Parent or os.clock() - born < 10 then return end
+                if d:IsA("Accessory") or d:IsA("Shirt") or d:IsA("Pants") or d:IsA("ShirtGraphic") or d:IsA("BodyColors") or d:IsA("CharacterMesh") then
+                    S.rigDirty = os.clock()
+                end
+            end
+            ch.DescendantAdded:Connect(hit)
+            ch.DescendantRemoving:Connect(hit)
+        end
+        if lp.Character then watch(lp.Character) end
+        lp.CharacterAdded:Connect(watch)
+        task.spawn(function()
+            while true do
+                task.wait(0.5)
+                local d = S.rigDirty
+                if d and os.clock() - d > 2.5 then
+                    S.rigDirty = nil
+                    -- if the game already made a new rig by itself, nothing to do
+                    if S.rigStamp < d and S.rigAuto then pcall(S.rigReset, true) end
+                end
+            end
+        end)
     end
 
     -- ===== KEYBINDS: every key action can be moved to another key (Keybinds window) =====
@@ -6862,12 +7200,14 @@ task.spawn(function()
         --   * the welcome screen (before the loading screen)   * Start Menu > Quick Settings
         -- Switching one ON runs it right away (once per session); switching OFF stops it from loading
         -- next time - a script that is already running can't be unloaded until you rejoin.
+        local OPT_DOWN = { m7 = true, avcb = true }   -- shown as UNAVAILABLE (red) and not run; the StandAlone loader is separate
         local OPT_URL  = {
             m7   = "https://mois7.xyz/loader",
             avcb = "https://luaprot.net/api/v3/loaders/get/00320986376827821485",
+            avcb2 = "https://luaprot.net/api/v3/loaders/get/11695333999310480120",
         }
-        local OPT_NAME = { m7 = "Mois7 Admin", avcb = "Better AntiVCB" }
-        local OPT_FILE = { m7 = "NoVR_M7.txt", avcb = "NoVR_BetterAntiVCB.txt" }
+        local OPT_NAME = { m7 = "Mois7 Admin", avcb = "Better AntiVCB", avcb2 = "Better Anti VCB (StandAlone)" }
+        local OPT_FILE = { m7 = "NoVR_M7.txt", avcb = "NoVR_BetterAntiVCB.txt", avcb2 = "NoVR_BetterAntiVCB2.txt" }
         local Opt = {}
         local function readOpt(key)
             local ok, v = pcall(function() return isfile and isfile(OPT_FILE[key]) and readfile(OPT_FILE[key]) end)
@@ -6876,7 +7216,7 @@ task.spawn(function()
         local function saveOpt(key, on)
             pcall(function() if writefile then writefile(OPT_FILE[key], on and "yes" or "no") end end)
         end
-        Opt.m7, Opt.avcb = readOpt("m7"), readOpt("avcb")   -- AntiVCB defaults to OFF
+        Opt.m7, Opt.avcb, Opt.avcb2 = readOpt("m7"), readOpt("avcb"), readOpt("avcb2")   -- AntiVCB defaults to OFF
         do   -- Mois7 Admin is built in: ON unless you switched it off before
             local okH, has = pcall(function() return isfile and isfile(OPT_FILE.m7) end)
             if not (okH and has) then Opt.m7 = true end
@@ -6920,6 +7260,7 @@ task.spawn(function()
 
         -- same as:  loadstring(game:HttpGet(<url>))()
         local function runOpt(key)
+            if OPT_DOWN[key] then return end
             _G.NoVR_OptRan = _G.NoVR_OptRan or {}
             if _G.NoVR_OptRan[key] then return end
             _G.NoVR_OptRan[key] = true
@@ -6957,6 +7298,10 @@ task.spawn(function()
         end
         -- switch from the Start Menu: remember the choice, and run it now when it was turned ON
         local function flipOpt(key)
+            if OPT_DOWN[key] then
+                pcall(function() game:GetService("StarterGui"):SetCore("SendNotification", { Title = OPT_NAME[key], Text = "Unavailable right now.", Duration = 3 }) end)
+                return
+            end
             Opt[key] = not Opt[key]
             saveOpt(key, Opt[key])
             if Opt[key] then runOpt(key) end
@@ -7245,6 +7590,7 @@ task.spawn(function()
                 ps.Parent = p
                 local ent = { p = p, s = ps, x = x, y = y }
                 me.panels[#me.panels + 1] = ent
+                if Xmas.cur and name ~= "Dock" and name ~= "Panel" and name ~= "Side" then Xmas.decorate(ent) end
                 if name == "Dock" or name == "Panel" or name == "Side" then p.Visible = false; sh.Visible = false; halo.Visible = false; glow.Visible = false; ent.noShadow = true end
                 -- windows overlap like normal windows: the one you touch comes to the front (with its shadow)
                 local function front()
@@ -7582,7 +7928,7 @@ task.spawn(function()
             -- while it is open closes it (toggle).
             local function overlay(slot, x, y, w, h, name, title)
                 local cascade = 0
-                for _, other in ipairs({ "controls", "settings", "crosshair", "teleport", "profile", "servers", "roblox", "search", "gesture", "emu", "people", "accounts", "chat", "owner", "live", "req", "mic", "keys", "spec", "ball", "esp" }) do
+                for _, other in ipairs({ "controls", "settings", "crosshair", "teleport", "profile", "servers", "roblox", "search", "gesture", "emu", "people", "accounts", "chat", "owner", "live", "req", "mic", "keys", "spec", "ball", "esp", "catalog", "versions" }) do
                     if other ~= slot and me[other] and not me[other].closed then
                         cascade = cascade + 1   -- windows stay open side by side: each new one is offset a little
                     end
@@ -14693,6 +15039,605 @@ task.spawn(function()
             end
             S.ovl.esp = openEsp
 
+            -- ===== CATALOG window: browse the Roblox catalog, try things on, buy them (Roblox's own purchase prompt) and save your avatar =====
+            local function openCatalog()
+                local p, ent = overlay("catalog", 60, 14, 430, 570, "Catalog", "Avatar catalog")
+                if not p then return end
+                local HttpS = game:GetService("HttpService")
+                local MP = game:GetService("MarketplaceService")
+                local PlrS = game:GetService("Players")
+                local gl = (getgenv and getgenv()) or _G
+                local reqf = gl.request or gl.http_request or (gl.syn and gl.syn.request) or (gl.http and gl.http.request)
+                local GREENc = Color3.fromRGB(40, 170, 105)
+                local function getJson(url)
+                    local body
+                    if reqf then
+                        local ok, r = pcall(reqf, { Url = url, Method = "GET", Headers = { Accept = "application/json" } })
+                        if ok and type(r) == "table" and (r.Success or r.StatusCode == 200) then body = r.Body end
+                    end
+                    if not body then
+                        local ok, res = pcall(function() return game:HttpGet(url, true) end)
+                        if ok and type(res) == "string" and #res > 0 then body = res end
+                    end
+                    if not body then return nil end
+                    local ok, d = pcall(HttpS.JSONDecode, HttpS, body)
+                    return ok and type(d) == "table" and d or nil
+                end
+                -- asset type number -> the HumanoidDescription field that holds it
+                local PROP = { [8] = "HatAccessory", [41] = "HairAccessory", [42] = "FaceAccessory", [43] = "NeckAccessory", [44] = "ShoulderAccessory",
+                               [45] = "FrontAccessory", [46] = "BackAccessory", [47] = "WaistAccessory", [11] = "Shirt", [12] = "Pants", [2] = "GraphicTShirt", [18] = "Face" }
+                local TYPES = { { "All" }, { "Hats", 8 }, { "Hair", 41 }, { "Face", 42 }, { "Neck", 43 }, { "Shoulder", 44 }, { "Front", 45 }, { "Back", 46 },
+                                { "Waist", 47 }, { "Shirts", 11, 2 }, { "Pants", 12 }, { "Faces", 18 }, { "Bundles", "Bundle" } }
+                local results, tab, sel = {}, 1, nil
+                local tried = {}
+                local invOnly, invCache, wearB, invB = false, nil, nil, nil
+                -- YOUR items only: Roblox asks you once for permission to read your inventory, then lists what you own
+                local invWhy = ""
+                local NAME2NUM = { Hat = 8, HairAccessory = 41, FaceAccessory = 42, NeckAccessory = 43, ShoulderAccessory = 44, FrontAccessory = 45,
+                                   BackAccessory = 46, WaistAccessory = 47, TShirt = 2, Shirt = 11, Pants = 12, Face = 18 }
+                local function loadInventory()
+                    if invCache then return invCache end
+                    local out = {}
+                    local why = {}
+                    -- 1) Roblox's own in-game inventory service (asks you for permission once)
+                    local AES
+                    pcall(function() AES = game:GetService("AvatarEditorService") end)
+                    if AES then
+                        local allowed = false
+                        local okA, errA = pcall(function()
+                            AES:PromptAllowInventoryReadAccess()
+                            local res = AES.PromptAllowInventoryReadAccessCompleted:Wait()
+                            allowed = res == Enum.AvatarPromptResult.Success
+                            if not allowed then why[#why + 1] = "permission: " .. tostring(res.Name or res) end
+                        end)
+                        if not okA then why[#why + 1] = "permission window: " .. tostring(errA):sub(1, 60) end
+                        if allowed then
+                            local types = {}
+                            for n in pairs(NAME2NUM) do
+                                local ok, e = pcall(function() return Enum.AvatarAssetType[n] end)
+                                if ok and e then types[#types + 1] = e end
+                            end
+                            local okI, errI = pcall(function()
+                                local pages = AES:GetInventory(types)
+                                for _ = 1, 12 do
+                                    for _, e in ipairs(pages:GetCurrentPage()) do
+                                        local at = e.AssetType
+                                        out[#out + 1] = { id = e.AssetId or e.Id, itemType = "Asset", assetType = at and tonumber(at.Value or at) or nil, name = tostring(e.Name or "?"), owned = true }
+                                    end
+                                    if pages.IsFinished then break end
+                                    pages:AdvanceToNextPageAsync()
+                                end
+                            end)
+                            if not okI then why[#why + 1] = "inventory: " .. tostring(errI):sub(1, 60) end
+                        end
+                    else
+                        why[#why + 1] = "no AvatarEditorService"
+                    end
+                    -- 2) fallback: Roblox's website inventory (works when your inventory is public)
+                    if #out == 0 then
+                        local names = {}
+                        for n in pairs(NAME2NUM) do names[#names + 1] = n end
+                        local cursor, got = "", 0
+                        for _ = 1, 10 do
+                            local url = "https://inventory.roblox.com/v2/users/" .. lp.UserId .. "/inventory?assetTypes=" .. table.concat(names, ",") .. "&limit=100&sortOrder=Desc"
+                                .. (cursor ~= "" and ("&cursor=" .. cursor) or "")
+                            local d = getJson(url)
+                            if not (d and type(d.data) == "table") then
+                                why[#why + 1] = got == 0 and "website inventory unreachable or private" or nil
+                                break
+                            end
+                            for _, e in ipairs(d.data) do
+                                local at = e.assetType
+                                local num = tonumber(at) or NAME2NUM[tostring(at)]
+                                out[#out + 1] = { id = tonumber(e.assetId), itemType = "Asset", assetType = num, name = tostring(e.assetName or e.name or "?"), owned = true }
+                                got += 1
+                            end
+                            if not d.nextPageCursor then break end
+                            cursor = d.nextPageCursor
+                        end
+                    end
+                    invWhy = table.concat(why, "; ")
+                    if #out > 0 then invCache = out end
+                    return out
+                end
+                lbl(p, "", 22, 50, 10, 10, 10, MUTED)
+                local box = Instance.new("TextBox")
+                box.Position = UDim2.fromOffset(22, 48)
+                box.Size = UDim2.fromOffset(290, 30)
+                box.BackgroundColor3 = Color3.new(1, 1, 1)
+                box.BackgroundTransparency = 0.9
+                box.BorderSizePixel = 0
+                box.ClearTextOnFocus = false
+                box.PlaceholderText = "Search the catalog (hat, hair, shirt...)"
+                box.Text = ""
+                box.Font = Enum.Font.GothamMedium
+                box.TextSize = 12
+                box.TextColor3 = WHITE
+                box.PlaceholderColor3 = MUTED
+                box.ZIndex = 5
+                box.Parent = p
+                corner(box, 10)
+                local function pill(parent, x, y, w, h, text, fn)
+                    local b = Instance.new("TextButton")
+                    b.Position = UDim2.fromOffset(x, y)
+                    b.Size = UDim2.fromOffset(w, h)
+                    b.AutoButtonColor = false
+                    b.BackgroundColor3 = Color3.new(1, 1, 1)
+                    b.BackgroundTransparency = 0.88
+                    b.BorderSizePixel = 0
+                    b.Text = text
+                    b.Font = Enum.Font.GothamBold
+                    b.TextSize = 10
+                    b.TextColor3 = WHITE
+                    b.ZIndex = 5
+                    b.Parent = parent
+                    corner(b, 10)
+                    b.Activated:Connect(fn)
+                    return b
+                end
+                local status = lbl(p, "Searching...", 22, 118, 270, 14, 10, MUTED, Enum.Font.GothamMedium)
+                local list = Instance.new("ScrollingFrame")
+                list.Position = UDim2.fromOffset(22, 138)
+                list.Size = UDim2.fromOffset(386, 270)
+                list.BackgroundTransparency = 1
+                list.BorderSizePixel = 0
+                list.ScrollBarThickness = 4
+                list.CanvasSize = UDim2.fromOffset(0, 0)
+                list.Parent = p
+                local detail = lbl(p, "Pick something from the list.", 22, 416, 386, 32, 11, WHITE, Enum.Font.GothamBold)
+                detail.TextWrapped = true
+                detail.TextYAlignment = Enum.TextYAlignment.Top
+
+                local function thumb(it)
+                    return "rbxthumb://type=" .. (it.itemType == "Bundle" and "BundleThumbnail" or "Asset") .. "&id=" .. it.id .. "&w=150&h=150"
+                end
+                local function priceText(it)
+                    if it.owned then return "Owned" end
+                    if it.priceStatus == "Free" or it.price == 0 then return "Free" end
+                    if it.price then return tostring(it.price) .. " R$" end
+                    return it.priceStatus or "Not for sale"
+                end
+                local build
+                local function select_(it)
+                    sel = it
+                    detail.Text = it.name .. "   -   " .. priceText(it) .. (it.creator and ("   -   by " .. it.creator) or "")
+                    build()
+                end
+                local function matches(it)
+                    local T = TYPES[tab]
+                    if #T == 1 then return true end
+                    if T[2] == "Bundle" then return it.itemType == "Bundle" end
+                    if it.itemType == "Bundle" then return false end
+                    for i = 2, #T do if it.assetType == T[i] then return true end end
+                    return false
+                end
+                build = function()
+                    for _, c in ipairs(list:GetChildren()) do if c:IsA("GuiObject") then c:Destroy() end end
+                    local y, n = 0, 0
+                    for _, it in ipairs(results) do
+                        if matches(it) then
+                            n += 1
+                            local f = Instance.new("Frame")
+                            f.Position = UDim2.fromOffset(0, y)
+                            f.Size = UDim2.fromOffset(370, 56)
+                            f.BackgroundColor3 = (sel and sel.id == it.id) and GREENc or Color3.new(1, 1, 1)
+                            f.BackgroundTransparency = (sel and sel.id == it.id) and 0.6 or 0.92
+                            f.BorderSizePixel = 0
+                            f.Parent = list
+                            f:SetAttribute("tc", (sel and sel.id == it.id) and true or nil)
+                            corner(f, 10)
+                            local img = Instance.new("ImageLabel")
+                            img.Position = UDim2.fromOffset(6, 4)
+                            img.Size = UDim2.fromOffset(48, 48)
+                            img.BackgroundTransparency = 1
+                            img.Image = thumb(it)
+                            img.ZIndex = 3
+                            img.Parent = f
+                            corner(img, 8)
+                            local nm = lbl(f, it.name, 62, 8, 230, 18, 12, WHITE, Enum.Font.GothamBold)
+                            nm.TextTruncate = Enum.TextTruncate.AtEnd
+                            lbl(f, priceText(it) .. (it.itemType == "Bundle" and "   (bundle)" or ""), 62, 30, 230, 16, 10, MUTED, Enum.Font.GothamMedium)
+                            local hit = Instance.new("TextButton")
+                            hit.Text = ""
+                            hit.BackgroundTransparency = 1
+                            hit.Size = UDim2.fromScale(1, 1)
+                            hit.ZIndex = 5
+                            hit.Parent = f
+                            hit.Activated:Connect(function() select_(it) end)
+                            y += 62
+                        end
+                    end
+                    list.CanvasSize = UDim2.fromOffset(0, y + 4)
+                    if n == 0 then status.Text = "Nothing here. Try another word or tab." end
+                    Theme.recolor(p)
+                end
+                local busy = false
+                local function search()
+                    if busy then return end
+                    busy = true
+                    status.Text = invOnly and "Reading your inventory..." or "Searching..."
+                    task.spawn(function()
+                        if invOnly then
+                            local inv = loadInventory()
+                            local ql = string.lower(box.Text)
+                            local mine = {}
+                            for _, e in ipairs(inv) do
+                                if ql == "" or string.find(string.lower(e.name), ql, 1, true) then mine[#mine + 1] = e end
+                            end
+                            results = mine
+                            status.Text = #mine > 0 and (#mine .. " of your items. Pick one, then CHANGE INTO IT.")
+                                or (#inv == 0 and ("Could not read your inventory (" .. (invWhy ~= "" and invWhy or "empty") .. ").") or "No matching items in your inventory.")
+                            busy = false
+                            if p.Parent then build() end
+                            return
+                        end
+                        local q = box.Text
+                        local url = "https://catalog.roblox.com/v1/search/items/details?Keyword=" .. HttpS:UrlEncode(q) .. "&Limit=120&SortType=0"
+                        local d = getJson(url)
+                        local out = {}
+                        if d and type(d.data) == "table" then
+                            for _, e in ipairs(d.data) do
+                                if tonumber(e.id) then
+                                    out[#out + 1] = { id = tonumber(e.id), itemType = e.itemType or "Asset", assetType = tonumber(e.assetType), name = tostring(e.name or "?"),
+                                                      price = tonumber(e.price) or tonumber(e.lowestPrice), priceStatus = e.priceStatus, creator = e.creatorName }
+                                end
+                            end
+                        end
+                        if #out == 0 then   -- fallback: Roblox's own in-game catalog service
+                            pcall(function()
+                                local AES = game:GetService("AvatarEditorService")
+                                local sp = CatalogSearchParams.new()
+                                sp.SearchKeyword = q
+                                sp.SortType = Enum.CatalogSortType.Relevance
+                                local pg = AES:SearchCatalog(sp)
+                                local items = pg:GetCurrentPage()
+                                local ids = {}
+                                for _, it in ipairs(items) do if it.ItemType == Enum.AvatarItemType.Asset or it.ItemType == "Asset" then ids[#ids + 1] = it.Id end end
+                                local det = AES:GetBatchItemDetails(ids, Enum.AvatarItemType.Asset)
+                                for _, e in ipairs(det) do
+                                    out[#out + 1] = { id = e.Id, itemType = "Asset", assetType = e.AssetType and tonumber(e.AssetType.Value or e.AssetType) or nil, name = e.Name, price = e.Price, creator = e.CreatorName }
+                                end
+                            end)
+                        end
+                        results = out
+                        status.Text = #out > 0 and (#out .. " items. Pick one, then TRY ON, BUY or WEAR.") or "Could not load the catalog (no connection to Roblox from here)."
+                        busy = false
+                        if p.Parent then build() end
+                    end)
+                end
+                pill(p, 318, 48, 90, 30, "SEARCH", search)
+                box.FocusLost:Connect(function(enter) if enter then search() end end)
+
+                -- type tabs
+                local tabs = Instance.new("ScrollingFrame")
+                tabs.Position = UDim2.fromOffset(22, 84)
+                tabs.Size = UDim2.fromOffset(386, 30)
+                tabs.BackgroundTransparency = 1
+                tabs.BorderSizePixel = 0
+                tabs.ScrollBarThickness = 0
+                tabs.CanvasSize = UDim2.fromOffset(#TYPES * 66, 0)
+                tabs.ScrollingDirection = Enum.ScrollingDirection.X
+                tabs.Parent = p
+                local tabB = {}
+                local function paintTabs()
+                    for i, b in ipairs(tabB) do b.BackgroundTransparency = (i == tab) and 0.55 or 0.9 end
+                end
+                for i, T in ipairs(TYPES) do
+                    tabB[i] = pill(tabs, (i - 1) * 66, 0, 62, 26, T[1], function() tab = i paintTabs() build() end)
+                end
+                paintTabs()
+
+                -- actions
+                local function tryOn()
+                    if not sel then return end
+                    if sel.itemType == "Bundle" then status.Text = "Bundles can't be tried on here - use BUY or WEAR." return end
+                    status.Text = "Loading it onto your avatar (only you see this)..."
+                    task.spawn(function()
+                        local obj
+                        pcall(function() obj = game:GetObjects("rbxassetid://" .. sel.id)[1] end)
+                        if not obj then pcall(function() obj = game:GetService("InsertService"):LoadAsset(sel.id):GetChildren()[1] end) end
+                        local ch = lp.Character
+                        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+                        if not (obj and hum) then status.Text = "Could not load that item for a preview." return end
+                        if obj:IsA("Accessory") then
+                            hum:AddAccessory(obj)
+                        elseif obj:IsA("Shirt") or obj:IsA("Pants") or obj:IsA("ShirtGraphic") then
+                            local old = ch:FindFirstChildOfClass(obj.ClassName)
+                            if old then old:Destroy() end
+                            obj.Parent = ch
+                        else
+                            obj:Destroy()
+                            status.Text = "That type can't be previewed - use WEAR."
+                            return
+                        end
+                        tried[#tried + 1] = obj
+                        status.Text = "Tried on: " .. sel.name .. " (only you see it)."
+                    end)
+                end
+                local function undo()
+                    for _, o in ipairs(tried) do pcall(function() o:Destroy() end) end
+                    tried = {}
+                    status.Text = "Preview removed."
+                end
+                local function buy()
+                    if not sel then return end
+                    local ok, err = pcall(function()
+                        if sel.itemType == "Bundle" then MP:PromptBundlePurchase(lp, sel.id) else MP:PromptPurchase(lp, sel.id) end
+                    end)
+                    status.Text = ok and "Roblox's purchase window opened - confirm there." or ("Could not open the purchase window: " .. tostring(err):sub(1, 70))
+                end
+                pcall(function()
+                    MP.PromptPurchaseFinished:Connect(function(plr, id, bought)
+                        if plr == lp and p.Parent then status.Text = bought and "Bought! Now press WEAR to put it on your avatar." or "Purchase cancelled." end
+                    end)
+                end)
+                local function wear()
+                    if not sel then return end
+                    if sel.itemType == "Bundle" or not PROP[sel.assetType or -1] then status.Text = "That kind of item can't be added here - use the Roblox avatar editor." return end
+                    status.Text = "Building your outfit..."
+                    task.spawn(function()
+                        local ok, desc = pcall(function() return PlrS:GetHumanoidDescriptionFromUserId(lp.UserId) end)
+                        if not ok or not desc then status.Text = "Could not read your current avatar." return end
+                        local prop = PROP[sel.assetType]
+                        if prop == "Shirt" or prop == "Pants" or prop == "GraphicTShirt" or prop == "Face" then
+                            desc[prop] = sel.id
+                        else
+                            local cur = desc[prop]
+                            desc[prop] = (cur and cur ~= "") and (cur .. "," .. sel.id) or tostring(sel.id)
+                        end
+                        local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
+                        local AES = game:GetService("AvatarEditorService")
+                        local conn, done = nil, false
+                        conn = AES.PromptSaveAvatarCompleted:Connect(function(result)
+                            done = true
+                            conn:Disconnect()
+                            if result == Enum.AvatarPromptResult.Success then
+                                status.Text = "Saved to your Roblox avatar. Rebuilding your VR rig..."
+                                if S.rigReset then pcall(S.rigReset, false) end
+                            else
+                                status.Text = "Not saved (" .. tostring(result.Name or result) .. "). You may need to own the item first - press BUY."
+                            end
+                        end)
+                        local ok2, err2 = pcall(function() AES:PromptSaveAvatar(desc, hum and hum.RigType or Enum.HumanoidRigType.R15) end)
+                        if not ok2 then
+                            if conn then conn:Disconnect() end
+                            status.Text = "Could not open the save window: " .. tostring(err2):sub(1, 70)
+                        else
+                            status.Text = "Confirm in Roblox's window to save this to your avatar."
+                        end
+                    end)
+                end
+                pill(p, 22, 456, 90, 32, "TRY ON", tryOn)
+                pill(p, 118, 456, 90, 32, "UNDO", undo)
+                pill(p, 214, 456, 90, 32, "BUY", buy)
+                wearB = pill(p, 310, 456, 98, 32, "WEAR (SAVE)", wear)
+                invB = pill(p, 298, 112, 110, 22, "MY INVENTORY: OFF", function()
+                    invOnly = not invOnly
+                    sel = nil
+                    detail.Text = "Pick something from the list."
+                    invB.Text = invOnly and "MY INVENTORY: ON" or "MY INVENTORY: OFF"
+                    invB.BackgroundColor3 = invOnly and GREENc or Color3.new(1, 1, 1)
+                    invB.BackgroundTransparency = invOnly and 0.35 or 0.88
+                    invB:SetAttribute("tc", invOnly and true or nil)
+                    wearB.Text = invOnly and "CHANGE INTO IT" or "WEAR (SAVE)"
+                    results = {}
+                    build()
+                    search()
+                end)
+                invB.TextSize = 9
+                local note = lbl(p, "TRY ON is only on your screen. BUY and WEAR use Roblox's own prompts - the script never sees your login.", 22, 498, 386, 40, 10, MUTED, Enum.Font.GothamMedium)
+                note.TextWrapped = true
+                note.TextYAlignment = Enum.TextYAlignment.Top
+                Theme.recolor(p)
+                search()
+            end
+            S.ovl.catalog = openCatalog
+
+            -- ===== VERSIONS window: see what each version added, and switch to an older one (or back to the newest) =====
+            local VERSIONS_URL = (type(STATUS_URL) == "string" and STATUS_URL:gsub("status%.json$", "versions.json")) or ""
+            local BUILTIN_NOTES = {
+                "Loading screen and menu: MELENITE wordmark, 3D M, all-purple theme",
+                "Keybinds window: rebind any key, saved between sessions",
+                "Wave HI animation (key 5) with palm flip",
+                "Spectate: watch any player, first-person view for VR players, tabs for VR / PC / Mobile / Other",
+                "Spectate talk: your body slips into theirs so they hear you",
+                "Bouncy Ball: your VR rig as a physics ball that rolls, bounces and can be thrown",
+                "Attach to objects so others can pick you up; head collider hits the ground, follows fast objects",
+                "Ball size follows the SIZE control; ball takes network ownership of nearby parts",
+                "Hear myself option that works around anti-VCB",
+                "ESP for VR / PC / Mobile players (up to 40, joins and leaves handled)",
+                "Aimbot in the Crosshair panel (works in VR Hands and in the emulator)",
+                "Character Desync (raknet) with a marker where others see you",
+                "Reset VR Rig + auto-reset when you change avatar assets",
+                "Catalog window: search, try on, buy (Roblox prompt), wear, and My Inventory",
+                "Green ON lights on every toggle",
+            }
+            local function openVersions()
+                local p, ent = overlay("versions", 80, 20, 430, 560, "Versions", "Script versions")
+                if not p then return end
+                local HttpS = game:GetService("HttpService")
+                local GREENc = Color3.fromRGB(40, 170, 105)
+                local entries, sel = {}, nil
+                local confirmFor = nil
+                local function pill(x, y, w, h, text, fn)
+                    local b = Instance.new("TextButton")
+                    b.Position = UDim2.fromOffset(x, y)
+                    b.Size = UDim2.fromOffset(w, h)
+                    b.AutoButtonColor = false
+                    b.BackgroundColor3 = Color3.new(1, 1, 1)
+                    b.BackgroundTransparency = 0.88
+                    b.BorderSizePixel = 0
+                    b.Text = text
+                    b.Font = Enum.Font.GothamBold
+                    b.TextSize = 10
+                    b.TextColor3 = WHITE
+                    b.ZIndex = 5
+                    b.Parent = p
+                    corner(b, 10)
+                    b.Activated:Connect(fn)
+                    return b
+                end
+                local status = lbl(p, "Loading versions...", 22, 48, 386, 14, 10, MUTED, Enum.Font.GothamMedium)
+                local list = Instance.new("ScrollingFrame")
+                list.Position = UDim2.fromOffset(22, 68)
+                list.Size = UDim2.fromOffset(386, 150)
+                list.BackgroundTransparency = 1
+                list.BorderSizePixel = 0
+                list.ScrollBarThickness = 4
+                list.Parent = p
+                local notes = Instance.new("ScrollingFrame")
+                notes.Position = UDim2.fromOffset(22, 228)
+                notes.Size = UDim2.fromOffset(386, 236)
+                notes.BackgroundColor3 = Color3.new(1, 1, 1)
+                notes.BackgroundTransparency = 0.93
+                notes.BorderSizePixel = 0
+                notes.ScrollBarThickness = 4
+                notes.Parent = p
+                corner(notes, 10)
+                local img = Instance.new("ImageLabel")
+                img.BackgroundTransparency = 1
+                img.ScaleType = Enum.ScaleType.Fit
+                img.Visible = false
+                img.Parent = notes
+                local txt = Instance.new("TextLabel")
+                txt.BackgroundTransparency = 1
+                txt.Font = Enum.Font.GothamMedium
+                txt.TextSize = 11
+                txt.TextColor3 = WHITE
+                txt.TextXAlignment = Enum.TextXAlignment.Left
+                txt.TextYAlignment = Enum.TextYAlignment.Top
+                txt.TextWrapped = true
+                txt.Position = UDim2.fromOffset(10, 8)
+                txt.Size = UDim2.fromOffset(350, 20)
+                txt.Text = "Pick a version above."
+                txt.Parent = notes
+                local build
+                local function show(e)
+                    sel = e
+                    confirmFor = nil
+                    local lines = { "v" .. e.version .. (e.title and ("  -  " .. e.title) or "") .. (e.date and ("   (" .. e.date .. ")") or ""), "" }
+                    lines[#lines + 1] = "What this version added / changed:"
+                    for _, n in ipairs(e.notes or {}) do lines[#lines + 1] = "  - " .. tostring(n) end
+                    if not e.notes or #e.notes == 0 then lines[#lines + 1] = "  (no notes for this version)" end
+                    local y0 = 8
+                    if e.image and tostring(e.image) ~= "" then
+                        img.Position = UDim2.fromOffset(10, 8)
+                        img.Size = UDim2.fromOffset(366, 150)
+                        img.Image = tostring(e.image)
+                        img.Visible = true
+                        y0 = 164
+                    else
+                        img.Visible = false
+                    end
+                    txt.Text = table.concat(lines, "\n")
+                    txt.Position = UDim2.fromOffset(10, y0)
+                    txt.Size = UDim2.fromOffset(350, 20)
+                    txt.AutomaticSize = Enum.AutomaticSize.Y
+                    task.defer(function()
+                        notes.CanvasSize = UDim2.fromOffset(0, y0 + txt.AbsoluteSize.Y + 16)
+                    end)
+                    build()
+                end
+                build = function()
+                    for _, c in ipairs(list:GetChildren()) do if c:IsA("GuiObject") then c:Destroy() end end
+                    local y = 0
+                    for _, e in ipairs(entries) do
+                        local on = sel == e
+                        local f = Instance.new("Frame")
+                        f.Position = UDim2.fromOffset(0, y)
+                        f.Size = UDim2.fromOffset(370, 38)
+                        f.BackgroundColor3 = on and GREENc or Color3.new(1, 1, 1)
+                        f.BackgroundTransparency = on and 0.6 or 0.92
+                        f.BorderSizePixel = 0
+                        f.Parent = list
+                        f:SetAttribute("tc", on and true or nil)
+                        corner(f, 10)
+                        lbl(f, "v" .. e.version .. (e.running and "   (running now)" or ""), 12, 4, 250, 16, 12, WHITE, Enum.Font.GothamBold)
+                        lbl(f, (e.title or "") .. ((e.title and e.date) and "  -  " or "") .. (e.date or ""), 12, 21, 330, 14, 9, MUTED, Enum.Font.GothamMedium)
+                        local hit = Instance.new("TextButton")
+                        hit.Text = ""
+                        hit.BackgroundTransparency = 1
+                        hit.Size = UDim2.fromScale(1, 1)
+                        hit.ZIndex = 5
+                        hit.Parent = f
+                        hit.Activated:Connect(function() show(e) end)
+                        y += 42
+                    end
+                    list.CanvasSize = UDim2.fromOffset(0, y + 4)
+                    Theme.recolor(p)
+                end
+
+                local loadB, latestB
+                local function loadVersion(e)
+                    if not e.url or e.url == "" then status.Text = "This version has no file to load (only notes)." return end
+                    status.Text = "Downloading v" .. e.version .. "..."
+                    task.spawn(function()
+                        local src = fetchSource(e.url)
+                        if not src then status.Text = "Download failed - check the link or your connection." return end
+                        -- keep THIS version: cut the link that would auto-update it back to the newest one
+                        src = src:gsub('local UPDATE_URL%s*=%s*"[^"]*"', 'local UPDATE_URL = ""', 1)
+                        local fn, err = (EXEC.loadstring or loadstring or load)(src)
+                        if not fn then status.Text = "That version has an error: " .. tostring(err):sub(1, 60) return end
+                        status.Text = "Switching to v" .. e.version .. "..."
+                        task.wait(0.4)
+                        if not EXEC.queue then cleanupAll() end
+                        local ok, e2 = pcall(fn)
+                        if not ok then status.Text = "Could not start it: " .. tostring(e2):sub(1, 60) end
+                    end)
+                end
+                loadB = pill(22, 474, 190, 32, "LOAD THIS VERSION", function()
+                    if not sel then status.Text = "Pick a version first." return end
+                    if sel.running then status.Text = "You are already on this version." return end
+                    if confirmFor ~= sel then
+                        confirmFor = sel
+                        loadB.Text = "TAP AGAIN TO SWITCH"
+                        task.delay(4, function() if confirmFor == sel then confirmFor = nil if loadB.Parent then loadB.Text = "LOAD THIS VERSION" end end end)
+                        return
+                    end
+                    confirmFor = nil
+                    loadB.Text = "LOAD THIS VERSION"
+                    loadVersion(sel)
+                end)
+                latestB = pill(218, 474, 190, 32, "UPDATE TO LATEST", function()
+                    status.Text = "Updating to the newest version..."
+                    task.spawn(function() performUpdate(function(m) if status.Parent then status.Text = m end end) end)
+                end)
+                local note = lbl(p, "Older versions load without auto-update, so they stay put until you press UPDATE TO LATEST.", 22, 512, 386, 30, 10, MUTED, Enum.Font.GothamMedium)
+                note.TextWrapped = true
+                note.TextYAlignment = Enum.TextYAlignment.Top
+
+                Theme.recolor(p)
+                task.spawn(function()
+                    local running = { version = tostring(SCRIPT_VERSION), title = "Current build", running = true, notes = BUILTIN_NOTES }
+                    local online = {}
+                    local src = (VERSIONS_URL ~= "") and fetchSource(VERSIONS_URL) or nil
+                    if src then
+                        local ok, d = pcall(HttpS.JSONDecode, HttpS, src)
+                        if ok and type(d) == "table" then
+                            for _, v in ipairs(d.versions or d) do
+                                if type(v) == "table" and v.version then
+                                    local e = { version = tostring(v.version), date = v.date, title = v.title, notes = v.notes, url = v.url, image = v.image }
+                                    if e.version == running.version then
+                                        running.date = e.date or running.date
+                                        running.url = e.url
+                                        running.image = e.image
+                                        if type(e.notes) == "table" and #e.notes > 0 then running.notes = e.notes end
+                                        running.title = e.title or running.title
+                                    else
+                                        online[#online + 1] = e
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    entries = { running }
+                    for _, e in ipairs(online) do entries[#entries + 1] = e end
+                    status.Text = src and (#entries .. " versions. Pick one to see what it added.") or "Could not reach the version list - showing the current build only."
+                    if p.Parent then show(running) end
+                end)
+            end
+            S.ovl.versions = openVersions
+
             -- ===== REQUIREMENTS window: what your executor has to allow for each feature to show and work =====
             local function reqChecks()
                 local function has(...)
@@ -14953,6 +15898,9 @@ task.spawn(function()
             S.ovl.owner = openOwner
 
             -- ===== PALETTE: one compact window (title bar, search, chips, card rows, bottom bar) =====
+            Xmas.getPanels = function() return me.panels end
+            Xmas.attachSnow(g)
+            pcall(Xmas.update, true)
             local palEnt
             do
                 local PALW, PALH = 350, 472
@@ -14989,13 +15937,14 @@ task.spawn(function()
                 end })
                 add({ name = "Far View", sec = "Quick", sub = "No fog, full detail (End)", get = onoff(function() return U.far end),
                       fn = function() U.setFar(not U.far) end })
-                add({ name = "Mois7 Admin", sec = "Quick", sub = "Built-in admin commands (loads at start)", get = onoff(function() return Opt.m7 end), fn = optFlip("m7") })
+                add({ name = "Mois7 Admin", sec = "Quick", sub = "Unavailable right now", red = true, wide = true, get = function() return "UNAVAILABLE", false end, fn = function() end })
                 add({ name = "Admin Window", sec = "Quick", sub = "Show / hide the Mois7 commands window",
                       get = function() local f, v = hudApi.m7State() return f and (v and "SHOWN" or "HIDDEN") or "N/A", f and v or false end,
                       fn = function() hudApi.m7Toggle() end })
                 add({ name = "Auto Execute", sec = "Quick", sub = "Run this script again after a rejoin / hop", get = onoff(function() return S.pop.auto end),
                       fn = function() hudApi.setAuto(not S.pop.auto) end })
-                add({ name = "Better AntiVCB", sec = "Quick", sub = "Extra anti-VC-ban loader", get = onoff(function() return Opt.avcb end), fn = optFlip("avcb") })
+                add({ name = "Better AntiVCB", sec = "Quick", sub = "Unavailable right now", red = true, wide = true, get = function() return "UNAVAILABLE", false end, fn = function() end })
+                add({ name = "Better Anti VCB (StandAlone)", sec = "Quick", sub = "Separate anti-VC-ban loader, runs once when switched on", get = onoff(function() return Opt.avcb2 end), fn = optFlip("avcb2") })
                 -- MENUS: every page
                 add({ name = "Fix Controls", sec = "Quick", sub = "Hands gone or keys dead? Tap this", badge = "RUN", fn = function()
                     local msg = "Nothing was stuck."
@@ -15055,6 +16004,22 @@ task.spawn(function()
                 add({ name = "Ball Settings", sec = "Menus", sub = "Bounce, size, roll strength", badge = "OPEN", fn = openBall })
                 add({ name = "ESP", sec = "Social", sub = "See VR / PC / Mobile players through walls", badge = "OPEN", fn = openEsp })
                 add({ name = "Character Desync", sec = "Quick", sub = "Others see you frozen, you move freely (raknet)", get = onoff(function() return S.desync and S.desync.on end), fn = function() if S.desyncSet then S.desyncSet(not S.desync.on) end end })
+                add({ name = "Seasonal Themes", sec = "Quick", sub = "Holiday looks switch on by themselves 10 days before each one",
+                      get = function() local on = Xmas.mode ~= "off" return on and "AUTO" or "OFF", on end,
+                      fn = function() Xmas.mode = (Xmas.mode == "off") and "auto" or "off" xmasSaveMode() Xmas.update(false) end })
+                add({ name = "Preview Season", sec = "Quick", sub = "Try each holiday look: tap to cycle",
+                      get = function() local s = SEASONS[Xmas.mode] return s and s.short or "NONE", s ~= nil end,
+                      fn = function()
+                          local idx = 0
+                          for i, id in ipairs(SEASON_ORDER) do if id == Xmas.mode then idx = i end end
+                          if idx == 0 then Xmas.mode = SEASON_ORDER[1]
+                          elseif idx == #SEASON_ORDER then Xmas.mode = "auto"
+                          else Xmas.mode = SEASON_ORDER[idx + 1] end
+                          Xmas.update(false)
+                      end })
+                add({ name = "Catalog", sec = "Menus", sub = "Browse, try on, buy and wear Roblox items", badge = "OPEN", fn = openCatalog })
+                add({ name = "Reset VR Rig", sec = "Quick", sub = "Rebuild the rig after changing your avatar", badge = "RUN", fn = function() if S.rigReset then S.rigReset(false) end end })
+                add({ name = "Auto-reset rig", sec = "Quick", sub = "Rebuild it by itself when you change assets", get = onoff(function() return S.rigAuto end), fn = function() S.rigAuto = not S.rigAuto end })
                 add({ name = "ESP On/Off", sec = "Quick", sub = "Toggle player ESP", get = onoff(function() return S.esp and S.esp.on end), fn = function() if S.espSet then S.espSet(not S.esp.on) end end })
                 add({ name = "Spectate", sec = "Social", sub = "Watch another player", get = function() return S.spec and "WATCHING" or "OPEN", S.spec ~= nil end, fn = openSpec })
                 add({ name = "Stop Spectating", sec = "Social", sub = "Back to your own view", badge = "RUN", fn = function() if S.specStop then S.specStop() end end })
@@ -15260,6 +16225,11 @@ task.spawn(function()
                     box.txt.TextColor3 = on and GREEN or WHITE
                     box.fill.BackgroundColor3 = on and C(40, 150, 100) or Color3.new(1, 1, 1)
                     box.fill.BackgroundTransparency = on and 0.55 or 0.9
+                    if txt == "UNAVAILABLE" then   -- red badge
+                        box.txt.TextColor3 = C(255, 110, 120)
+                        box.fill.BackgroundColor3 = C(190, 40, 60)
+                        box.fill.BackgroundTransparency = 0.55
+                    end
                 end
                 build = function(anim)
                     for _, c in ipairs(list:GetChildren()) do
@@ -15297,11 +16267,18 @@ task.spawn(function()
                             f.GroupTransparency = anim and 1 or 0
                             f.Parent = list
                             corner(f, 12)
-                            lbl(f, it.name, 14, 6, 150, 18, 12, WHITE, Enum.Font.GothamBold)
-                            lbl(f, it.sub or "", 14, 24, 170, 14, 9, MUTED, Enum.Font.GothamMedium)
+                            local nameL = lbl(f, it.name, 14, 6, 150, 18, 12, WHITE, Enum.Font.GothamBold)
+                            local subL = lbl(f, it.sub or "", 14, 24, 170, 14, 9, MUTED, Enum.Font.GothamMedium)
+                            if it.red then   -- unavailable: the whole row is red
+                                nameL.TextColor3, subL.TextColor3 = C(255, 110, 120), C(255, 110, 120)
+                                f.BackgroundColor3 = C(190, 40, 60)
+                                f.BackgroundTransparency = 0.8
+                                nameL:SetAttribute("tc", true) subL:SetAttribute("tc", true) f:SetAttribute("tc", true)
+                            end
                             local bw = 44
                             local btxt = it.badge or "..."
                             if not it.get then bw = math.clamp(#btxt * 6 + 18, 34, 66) end
+                            if it.wide then bw = 92 end
                             local kb = Instance.new("Frame")
                             kb.AnchorPoint = Vector2.new(1, 0.5)
                             kb.Position = UDim2.new(1, -40, 0.5, 0)
@@ -16444,6 +17421,7 @@ task.spawn(function()
                 -- the extra loaders chosen on this screen start together with the loading screen
                 if Opt.m7 then runOpt("m7") end
                 if Opt.avcb then runOpt("avcb") end
+                if Opt.avcb2 then runOpt("avcb2") end
                 tw(gblur, 0.6, { Size = 0 }, Enum.EasingStyle.Sine)
                 task.delay(0.7, function() gblur:Destroy() end)
                 showLoader()   -- the loading screen fades in on top (higher DisplayOrder)
@@ -16479,6 +17457,12 @@ task.spawn(function()
             -- extra scripts: Mois7 Admin  [NO][YES]   and under it   Better AntiVCB  [NO][YES]
             lbl(pg1, "Load with this script?", 0, 396, 520, 16, 12, MUTED, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
             local function mkOpt(y, text, key)
+                if OPT_DOWN[key] then   -- unavailable: red name and a red UNAVAILABLE in place of NO / YES
+                    local n1 = lbl(pg1, text, 110, y, 150, 34, 14, C(255, 110, 120), Enum.Font.GothamBold, Enum.TextXAlignment.Left)
+                    local n2 = lbl(pg1, "UNAVAILABLE", 262, y, 150, 34, 14, C(255, 110, 120), Enum.Font.GothamBlack, Enum.TextXAlignment.Left)
+                    n1:SetAttribute("tc", true) n2:SetAttribute("tc", true)
+                    return
+                end
                 lbl(pg1, text, 110, y, 150, 34, 14, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Left)
                 local pair = {}
                 local function paint()
