@@ -50,7 +50,7 @@ local UPDATE_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR
 --   2.0.4 -> 2.0.5 ... 2.0.12 -> 2.1.0 ... 2.1.12 -> 2.2.0 ... 2.12.12 -> 3.0.0
 -- Your Discord/status feed ("version" in status.json) should use the same pattern, and the script
 -- compares versions as NUMBERS (so 2.0.12 is newer than 2.0.4, and 2.1.0 is newer than 2.0.12).
-local SCRIPT_VERSION = "2.1.7"
+local SCRIPT_VERSION = "2.1.8"
 -- Optional: RAW link to a small JSON file YOU host. It feeds the Banwave / Key system / Script rows.
 -- Leave "" to skip. Example file:
 --   { "banwave": "clear", "banwave_note": "No wave reported",
@@ -3959,13 +3959,52 @@ task.spawn(function()
                 if c.Name == uid then task.spawn(adopt, c) end
             end)
         end
+        -- VR Hands can run with NO normal character: then the game's own remotes are the only way to ask for a new rig
+        local function viaRemote(auto)
+            local rs = game:GetService("ReplicatedStorage")
+            local root = rs:FindFirstChild("COM") or rs
+            local KEYS = { "resetrig", "rigreset", "refreshrig", "rebuildrig", "resetvr", "respawn", "resetchar", "reloadchar", "resetplayer", "refreshavatar", "resetavatar", "reset" }
+            local names, picks = {}, {}
+            for _, d in ipairs(root:GetDescendants()) do
+                if d:IsA("RemoteEvent") or d:IsA("RemoteFunction") then
+                    names[#names + 1] = d.ClassName .. " " .. d:GetFullName()
+                    local ln = string.lower(d.Name)
+                    for _, k in ipairs(KEYS) do
+                        if string.find(ln, k, 1, true) then picks[#picks + 1] = d break end
+                    end
+                end
+            end
+            local list = table.concat(names, "\n")
+            pcall(function() if writefile then writefile("NoVR_COM_remotes.txt", list) end end)
+            local gl = (getgenv and getgenv()) or _G
+            pcall(function() if gl.setclipboard then gl.setclipboard(list) end end)
+            if #picks == 0 then
+                note("You have no normal character here and I can't find a rig reset in this game. The game's remote list was copied to your clipboard (and NoVR_COM_remotes.txt) - send it to me.")
+                return
+            end
+            busy = true
+            local old = rig
+            note(auto and "Your avatar changed - asking the game for a new VR rig..." or "Asking the game for a new VR rig...")
+            for _, r in ipairs(picks) do
+                task.spawn(function()
+                    pcall(function() if r:IsA("RemoteEvent") then r:FireServer() else r:InvokeServer() end end)
+                end)
+            end
+            task.spawn(function()
+                local t0 = os.clock()
+                while os.clock() - t0 < 8 and (rig == old or not rig.Parent) do task.wait(0.2) end
+                S.rigStamp = os.clock()
+                busy = false
+                note(rig ~= old and "VR rig rebuilt." or "The game did not rebuild the rig. The remote list was copied - send it to me and I'll find the right one.")
+            end)
+        end
         function S.rigReset(auto)
             if U.emu then note("Reset VR Rig is for the VR Hands game.") return end
             if busy then return end
             local ch = lp.Character
-            local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-            if not hum then note("No character to rebuild the rig from.") return end
+            local hum = ch and ch:FindFirstChildWhichIsA("Humanoid", true)
+            local hrp = ch and (ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart)
+            if not hum then viaRemote(auto) return end
             busy = true
             local home, old = hrp and hrp.CFrame, rig
             note(auto and "Your avatar changed - rebuilding the VR rig..." or "Rebuilding your VR rig with your current avatar...")
