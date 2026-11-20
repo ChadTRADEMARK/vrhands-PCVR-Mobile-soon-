@@ -50,7 +50,7 @@ local UPDATE_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR
 --   2.0.4 -> 2.0.5 ... 2.0.12 -> 2.1.0 ... 2.1.12 -> 2.2.0 ... 2.12.12 -> 3.0.0
 -- Your Discord/status feed ("version" in status.json) should use the same pattern, and the script
 -- compares versions as NUMBERS (so 2.0.12 is newer than 2.0.4, and 2.1.0 is newer than 2.0.12).
-local SCRIPT_VERSION = "2.1.8"
+local SCRIPT_VERSION = "2.1.9"
 -- Optional: RAW link to a small JSON file YOU host. It feeds the Banwave / Key system / Script rows.
 -- Leave "" to skip. Example file:
 --   { "banwave": "clear", "banwave_note": "No wave reported",
@@ -117,6 +117,20 @@ local UIS         = game:GetService("UserInputService")
 local RunService  = game:GetService("RunService")
 local Players     = game:GetService("Players")
 local identity    = CFrame.identity
+-- every download goes through here: a missing / non-web link is skipped instead of making HttpGet throw an error
+local function hget(url, nc)
+    if type(url) ~= "string" or not string.match(url, "^https?://") then
+        -- note which feature asked, so the cause can be found (first 3 times only)
+        _G.NoVR_BadLinks = (_G.NoVR_BadLinks or 0) + 1
+        if _G.NoVR_BadLinks <= 3 then
+            pcall(function()
+                if appendfile then appendfile("NoVR_badlinks.txt", os.date() .. "  link=" .. tostring(url) .. "\n" .. debug.traceback() .. "\n\n") end
+            end)
+        end
+        return nil
+    end
+    return game["HttpGet"](game, url, nc)
+end
 
 -- ============ VERSION SCHEME ============
 -- MAJOR.MINOR.PATCH, each number counts 0..ROLLOVER then wraps and carries (2.0.12 -> 2.1.0, 2.12.12 -> 3.0.0).
@@ -3972,17 +3986,44 @@ task.spawn(function()
             return n .. ":" .. h
         end
         -- VR Hands can run with NO normal character: then the game's own remotes are the only way to ask for a new rig
+        local function askRejoin()   -- last resort: a pop-up with a REJOIN button (rejoining always loads the new avatar)
+            pcall(function()
+                local bf = Instance.new("BindableFunction")
+                bf.OnInvoke = function(choice)
+                    if choice == "Rejoin" then
+                        local ha = S.hudApi
+                        if ha and ha.queueSelf then pcall(ha.queueSelf) end
+                        pcall(function()
+                            local TS = game:GetService("TeleportService")
+                            if game.PrivateServerId ~= "" then TS:Teleport(game.PlaceId, lp) else TS:TeleportToPlaceInstance(game.PlaceId, game.JobId, lp) end
+                        end)
+                    end
+                end
+                game:GetService("StarterGui"):SetCore("SendNotification", { Title = "VR Rig", Text = "I could not reset the rig from inside this game. Rejoin the server to load your new avatar? (the script comes back by itself)", Duration = 15, Button1 = "Rejoin", Button2 = "No", Callback = bf })
+            end)
+        end
+        -- VR Hands may have no normal character, or ignore respawns: then try the game's own remotes, safest names first, and remember the one that works
         local function viaRemote(auto)
             local rs = game:GetService("ReplicatedStorage")
-            local root = rs:FindFirstChild("COM") or rs
-            local KEYS = { "resetrig", "rigreset", "refreshrig", "rebuildrig", "resetvr", "respawn", "resetchar", "reloadchar", "resetplayer", "refreshavatar", "resetavatar", "reset" }
-            local names, picks = {}, {}
-            for _, d in ipairs(root:GetDescendants()) do
+            local names, cands, seen = {}, {}, {}
+            local GOOD = { "resetrig", "rigreset", "refreshrig", "rebuildrig", "resetvr", "refreshavatar", "resetavatar", "updateavatar", "respawn", "reloadchar", "resetchar", "updaterig", "vrrig", "rig", "avatar", "appearance", "vr", "character", "reset", "refresh", "reload", "init" }
+            local BAD = { "kick", "ban", "report", "admin", "purchase", "buy", "teleport", "damage", "kill", "shoot", "fire", "hit", "chat", "message", "trade", "gift", "donat", "robux", "vote", "grab", "throw", "drop", "equip" }
+            local function add(r, score)
+                if not seen[r] then seen[r] = true cands[#cands + 1] = { r = r, s = score } end
+            end
+            local saved
+            pcall(function() if isfile and readfile and isfile("NoVR_rigremote.txt") then saved = readfile("NoVR_rigremote.txt") end end)
+            for _, d in ipairs(rs:GetDescendants()) do
                 if d:IsA("RemoteEvent") or d:IsA("RemoteFunction") then
                     names[#names + 1] = d.ClassName .. " " .. d:GetFullName()
                     local ln = string.lower(d.Name)
-                    for _, k in ipairs(KEYS) do
-                        if string.find(ln, k, 1, true) then picks[#picks + 1] = d break end
+                    local bad = false
+                    for _, k in ipairs(BAD) do if string.find(ln, k, 1, true) then bad = true break end end
+                    if saved and d:GetFullName() == saved then add(d, 0)
+                    elseif not bad then
+                        for i, k in ipairs(GOOD) do
+                            if string.find(ln, k, 1, true) then add(d, i) break end
+                        end
                     end
                 end
             end
@@ -3990,24 +4031,42 @@ task.spawn(function()
             pcall(function() if writefile then writefile("NoVR_COM_remotes.txt", list) end end)
             local gl = (getgenv and getgenv()) or _G
             pcall(function() if gl.setclipboard then gl.setclipboard(list) end end)
-            if #picks == 0 then
-                note("You have no normal character here and I can't find a rig reset in this game. The game's remote list was copied to your clipboard (and NoVR_COM_remotes.txt) - send it to me.")
+            table.sort(cands, function(x, y) return x.s < y.s end)
+            if #cands == 0 then
+                note("No rig reset found in this game. The game's remote list was copied - send it to me.")
+                askRejoin()
                 return
             end
             busy = true
             local old = rig
-            note(auto and "Your avatar changed - asking the game for a new VR rig..." or "Asking the game for a new VR rig...")
-            for _, r in ipairs(picks) do
-                task.spawn(function()
-                    pcall(function() if r:IsA("RemoteEvent") then r:FireServer() else r:InvokeServer() end end)
-                end)
-            end
+            local sig0 = rigSig(old)
+            note((auto and "Your avatar changed - " or "") .. "trying the game's own rig reset (" .. math.min(#cands, 12) .. " ways)...")
             task.spawn(function()
-                local t0 = os.clock()
-                while os.clock() - t0 < 8 and (rig == old or not rig.Parent) do task.wait(0.2) end
+                local worked
+                local ARGS = { {}, { lp }, { true } }
+                for i = 1, math.min(#cands, 12) do
+                    local r = cands[i].r
+                    for _, a in ipairs(ARGS) do
+                        task.spawn(function()
+                            pcall(function()
+                                if r:IsA("RemoteEvent") then r:FireServer(table.unpack(a)) else r:InvokeServer(table.unpack(a)) end
+                            end)
+                        end)
+                        local t0 = os.clock()
+                        while os.clock() - t0 < 1.2 and rig == old and rigSig(rig) == sig0 do task.wait(0.1) end
+                        if rig ~= old or rigSig(rig) ~= sig0 then worked = r break end
+                    end
+                    if worked then break end
+                end
                 S.rigStamp = os.clock()
                 busy = false
-                note(rig ~= old and "VR rig rebuilt." or "The game did not rebuild the rig. The remote list was copied - send it to me and I'll find the right one.")
+                if worked then
+                    pcall(function() if writefile then writefile("NoVR_rigremote.txt", worked:GetFullName()) end end)
+                    note("VR rig reset (" .. worked.Name .. "). I will use that one next time.")
+                else
+                    note("None of the game's remotes reset the rig. The list was copied - send it to me.")
+                    askRejoin()
+                end
             end)
         end
         function S.rigReset(auto)
@@ -4029,7 +4088,22 @@ task.spawn(function()
                     task.wait(0.2)
                     local c2 = lp.Character
                     h2 = c2 and c2 ~= ch and c2:FindFirstChild("HumanoidRootPart")
-                until h2 or os.clock() - t0 > 12
+                until h2 or os.clock() - t0 > 6
+                if not h2 then   -- Humanoid.Health = 0 did nothing: kill the character harder
+                    pcall(function() hum:ChangeState(Enum.HumanoidStateType.Dead) end)
+                    pcall(function() ch:BreakJoints() end)
+                    local t2 = os.clock()
+                    repeat
+                        task.wait(0.2)
+                        local c2 = lp.Character
+                        h2 = c2 and c2 ~= ch and c2:FindFirstChild("HumanoidRootPart")
+                    until h2 or os.clock() - t2 > 5
+                end
+                if not h2 then   -- this game does not respawn you: ask it for a new rig through its own remotes
+                    busy = false
+                    viaRemote(auto)
+                    return
+                end
                 if h2 and home then h2.CFrame = home end
                 -- the game may build a new rig model OR refresh the same one: either counts as a reset
                 local t1 = os.clock()
@@ -4210,6 +4284,7 @@ task.spawn(function()
 
     local hudLabel = nil
     local hudApi = {}   -- mobile controls menu: scaleBy(f), reset(), toggle()
+    S.hudApi = hudApi
 
     -- Named so the mobile buttons can feed the exact same logic as the keyboard/mouse.
     local function onInputBegan(io, gameProcessed)
@@ -6890,7 +6965,7 @@ task.spawn(function()
         local function fetchSource(url)
             local sep = string.find(url, "?", 1, true) and "&" or "?"
             local full = url .. sep .. "nocache=" .. tostring(os.time())   -- skip cached copies
-            local ok, res = pcall(function() return game:HttpGet(full, true) end)
+            local ok, res = pcall(function() return hget(full, true) end)
             if ok and type(res) == "string" and #res > 0 then return res end
             local req = (syn and syn.request) or http_request or request or (fluxus and fluxus.request)
             if req then
@@ -7146,7 +7221,7 @@ task.spawn(function()
                     return res.Body
                 end
             end
-            local ok, body = pcall(function() return game:HttpGet(url, true) end)
+            local ok, body = pcall(function() return hget(url, true) end)
             if ok and type(body) == "string" and #body > 0 then return body end
             return nil
         end
@@ -7317,7 +7392,7 @@ task.spawn(function()
             _G.NoVR_OptRan[key] = true
             task.spawn(function()
                 local url = OPT_URL[key]
-                local okG, src = pcall(function() return game:HttpGet(url) end)
+                local okG, src = pcall(function() return hget(url) end)
                 if not (okG and type(src) == "string" and #src > 0) then src = rawGet(url) end
                 if not src then
                     warn("[NoVR] " .. OPT_NAME[key] .. ": could not download the loader")
@@ -7439,7 +7514,7 @@ task.spawn(function()
                                 if ok and type(r) == "table" and (r.Success or r.StatusCode == 200) then body = r.Body end
                             end
                             if not body then
-                                local ok, r = pcall(function() return game:HttpGet(src, true) end)
+                                local ok, r = pcall(function() return hget(src, true) end)
                                 if ok then body = r end
                             end
                             if type(body) ~= "string" or #body < 16 then return nil, "Couldn't download that link." end
@@ -7979,7 +8054,7 @@ task.spawn(function()
             -- while it is open closes it (toggle).
             local function overlay(slot, x, y, w, h, name, title)
                 local cascade = 0
-                for _, other in ipairs({ "controls", "settings", "crosshair", "teleport", "profile", "servers", "roblox", "search", "gesture", "emu", "people", "accounts", "chat", "owner", "live", "req", "mic", "keys", "spec", "ball", "esp", "catalog", "versions" }) do
+                for _, other in ipairs({ "controls", "settings", "crosshair", "teleport", "profile", "servers", "roblox", "search", "gesture", "emu", "people", "accounts", "chat", "owner", "live", "req", "mic", "keys", "spec", "ball", "esp", "catalog", "versions", "countdown" }) do
                     if other ~= slot and me[other] and not me[other].closed then
                         cascade = cascade + 1   -- windows stay open side by side: each new one is offset a little
                     end
@@ -8978,7 +9053,7 @@ task.spawn(function()
 
                 local function getJson(url)
                     local body
-                    local ok, res = pcall(function() return game:HttpGet(url, true) end)
+                    local ok, res = pcall(function() return hget(url, true) end)
                     if ok and type(res) == "string" and #res > 0 then body = res end
                     if not body and req then
                         local ok2, r = pcall(req, { Url = url, Method = "GET" })
@@ -9338,7 +9413,7 @@ task.spawn(function()
                             if (r.Success or r.StatusCode == 200) and type(r.Body) == "string" and #r.Body > 0 then return r.Body, code end
                         end
                     end
-                    local ok, res = pcall(function() return game:HttpGet(url, true) end)
+                    local ok, res = pcall(function() return hget(url, true) end)
                     if ok and type(res) == "string" and #res > 0 then return res, 200 end
                     return nil, code
                 end
@@ -9795,7 +9870,7 @@ task.spawn(function()
                             end
                         end
                         if not body then
-                            local ok, res = pcall(function() return game:HttpGet(url, true) end)
+                            local ok, res = pcall(function() return hget(url, true) end)
                             if ok and type(res) == "string" and #res > 0 then body = res end
                         end
                         if body then
@@ -12362,7 +12437,7 @@ task.spawn(function()
                 local function getJson(url, method, body)
                     local text
                     if not method then
-                        local ok, res = pcall(function() return game:HttpGet(url, true) end)
+                        local ok, res = pcall(function() return hget(url, true) end)
                         if ok and type(res) == "string" and #res > 0 then text = res end
                     end
                     if not text and req then
@@ -12457,7 +12532,7 @@ task.spawn(function()
                 local function getJson(url, method, body)
                     local text
                     if not method then
-                        local ok, res = pcall(function() return game:HttpGet(url, true) end)
+                        local ok, res = pcall(function() return hget(url, true) end)
                         if ok and type(res) == "string" and #res > 0 then text = res end
                     end
                     if not text and req then
@@ -13180,7 +13255,7 @@ task.spawn(function()
                                 return res.Body
                             end
                         end
-                        local ok, body = pcall(function() return game:HttpGet(url, true) end)
+                        local ok, body = pcall(function() return hget(url, true) end)
                         if ok and type(body) == "string" and #body > 0 then return body end
                         return nil
                     end
@@ -15107,7 +15182,7 @@ task.spawn(function()
                         if ok and type(r) == "table" and (r.Success or r.StatusCode == 200) then body = r.Body end
                     end
                     if not body then
-                        local ok, res = pcall(function() return game:HttpGet(url, true) end)
+                        local ok, res = pcall(function() return hget(url, true) end)
                         if ok and type(res) == "string" and #res > 0 then body = res end
                     end
                     if not body then return nil end
@@ -15483,6 +15558,96 @@ task.spawn(function()
                 search()
             end
             S.ovl.catalog = openCatalog
+
+            -- ===== COUNTDOWN window: every holiday look, with a live clock to when it turns on =====
+            local function openCountdown()
+                local p, ent = overlay("countdown", 70, 24, 400, 420, "Countdown", "Season countdown")
+                if not p then return end
+                local GREENc = Color3.fromRGB(40, 170, 105)
+                local function dateOf(id, y)
+                    if id == "christmas" then return y, 12, 25 end
+                    if id == "halloween" then return y, 10, 31 end
+                    if id == "nye" then return y, 12, 31 end
+                    if id == "nyd" then return y, 1, 1 end
+                    local m, d = easterDate(y)
+                    return y, m, d
+                end
+                -- the next time this holiday's look runs (or the run that is on right now)
+                local function nextRun(id, now)
+                    local cy = os.date("*t", now).year
+                    for y = cy, cy + 1 do
+                        local yy, m, d = dateOf(id, y)
+                        local day0 = os.time({ year = yy, month = m, day = d, hour = 0 })
+                        local endTs = day0 + 86400
+                        if endTs > now then return day0 - 10 * 86400, day0, endTs end
+                    end
+                end
+                local function clock(sec)
+                    sec = math.max(0, math.floor(sec))
+                    local d = sec // 86400
+                    local h = (sec % 86400) // 3600
+                    local m = (sec % 3600) // 60
+                    local s = sec % 60
+                    return string.format("%dd %02d:%02d:%02d", d, h, m, s)
+                end
+                lbl(p, "Each holiday look turns on by itself 10 days before the holiday.", 22, 48, 356, 14, 10, MUTED, Enum.Font.GothamMedium)
+                local rows = {}
+                for i, id in ipairs(SEASON_ORDER) do
+                    local y = 74 + (i - 1) * 62
+                    local f = Instance.new("Frame")
+                    f.Position = UDim2.fromOffset(22, y)
+                    f.Size = UDim2.fromOffset(356, 56)
+                    f.BackgroundColor3 = Color3.new(1, 1, 1)
+                    f.BackgroundTransparency = 0.92
+                    f.BorderSizePixel = 0
+                    f.Parent = p
+                    corner(f, 12)
+                    local th = SEASONS[id]
+                    local nm = lbl(f, th.c1 .. "  " .. th.name, 12, 7, 220, 18, 13, WHITE, Enum.Font.GothamBold)
+                    local dl = lbl(f, "", 12, 30, 150, 16, 10, MUTED, Enum.Font.GothamMedium)
+                    local tl = lbl(f, "", 150, 18, 196, 20, 13, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Right)
+                    rows[i] = { id = id, f = f, dl = dl, tl = tl, nm = nm }
+                end
+                local function tick()
+                    local now = os.time()
+                    local order = {}
+                    for i, r in ipairs(rows) do
+                        local s, h0, e = nextRun(r.id, now)
+                        r.s, r.h, r.e = s, h0, e
+                        order[#order + 1] = r
+                    end
+                    table.sort(order, function(a, b) return a.s < b.s end)
+                    for i, r in ipairs(order) do
+                        r.f.Position = UDim2.fromOffset(22, 74 + (i - 1) * 62)
+                        local on = now >= r.s
+                        r.dl.Text = os.date("%b %d, %Y", r.h)
+                        if on then
+                            r.tl.Text = "ON NOW  -  ends in " .. clock(r.e - now)
+                            r.tl.TextColor3 = Color3.fromRGB(150, 255, 190)
+                            r.f.BackgroundColor3 = GREENc
+                            r.f.BackgroundTransparency = 0.7
+                        else
+                            r.tl.Text = "turns on in " .. clock(r.s - now)
+                            r.tl.TextColor3 = WHITE
+                            r.f.BackgroundColor3 = Color3.new(1, 1, 1)
+                            r.f.BackgroundTransparency = 0.92
+                        end
+                        r.tl:SetAttribute("tc", true)
+                        r.f:SetAttribute("tc", on and true or nil)
+                    end
+                end
+                local mode = lbl(p, "", 22, 390, 356, 16, 10, MUTED, Enum.Font.GothamMedium)
+                tick()
+                Theme.recolor(p)
+                task.spawn(function()
+                    while p.Parent and not ent.closed do
+                        task.wait(1)
+                        pcall(tick)
+                        mode.Text = Xmas.mode == "off" and "Seasonal themes are OFF - the countdown still runs." or "Seasonal themes are on AUTO."
+                    end
+                end)
+            end
+            S.ovl.countdown = openCountdown
 
             -- ===== VERSIONS window: see what each version added, and switch to an older one (or back to the newest) =====
             local VERSIONS_URL = (type(STATUS_URL) == "string" and STATUS_URL:gsub("status%.json$", "versions.json")) or ""
@@ -16068,6 +16233,15 @@ task.spawn(function()
                           else Xmas.mode = SEASON_ORDER[idx + 1] end
                           Xmas.update(false)
                       end })
+                add({ name = "Season Countdown", sec = "Menus", sub = "Live clock to every holiday look", badge = "OPEN", fn = openCountdown })
+                add({ name = "Rejoin (refresh avatar)", sec = "Quick", sub = "Same server, brings the script back, loads your new avatar", badge = "RUN", fn = function()
+                    pcall(function() game:GetService("StarterGui"):SetCore("SendNotification", { Title = "Rejoin", Text = "Rejoining this server...", Duration = 3 }) end)
+                    if hudApi.queueSelf then pcall(hudApi.queueSelf) end
+                    pcall(function()
+                        local TS = game:GetService("TeleportService")
+                        if game.PrivateServerId ~= "" then TS:Teleport(game.PlaceId, lp) else TS:TeleportToPlaceInstance(game.PlaceId, game.JobId, lp) end
+                    end)
+                end })
                 add({ name = "Catalog", sec = "Menus", sub = "Browse, try on, buy and wear Roblox items", badge = "OPEN", fn = openCatalog })
                 add({ name = "Reset VR Rig", sec = "Quick", sub = "Rebuild the rig after changing your avatar", badge = "RUN", fn = function() if S.rigReset then S.rigReset(false) end end })
                 add({ name = "Auto-reset rig", sec = "Quick", sub = "Rebuild it by itself when you change assets", get = onoff(function() return S.rigAuto end), fn = function() S.rigAuto = not S.rigAuto end })
