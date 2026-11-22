@@ -50,7 +50,7 @@ local UPDATE_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR
 --   2.0.4 -> 2.0.5 ... 2.0.12 -> 2.1.0 ... 2.1.12 -> 2.2.0 ... 2.12.12 -> 3.0.0
 -- Your Discord/status feed ("version" in status.json) should use the same pattern, and the script
 -- compares versions as NUMBERS (so 2.0.12 is newer than 2.0.4, and 2.1.0 is newer than 2.0.12).
-local SCRIPT_VERSION = "2.1.11"
+local SCRIPT_VERSION = "2.1.12"
 -- Optional: RAW link to a small JSON file YOU host. It feeds the Banwave / Key system / Script rows.
 -- Leave "" to skip. Example file:
 --   { "banwave": "clear", "banwave_note": "No wave reported",
@@ -4472,6 +4472,20 @@ task.spawn(function()
             UIS.MouseBehavior = Enum.MouseBehavior.LockCenter
             UIS.MouseIconEnabled = false
             touch.look = Vector2.zero
+            -- creep along slowly (10% speed) so you can walk without outrunning the menu; it drifts after you anyway
+            local m = Vector3.zero
+            if keys[Enum.KeyCode.W] then m += Vector3.new(0,0,-1) end
+            if keys[Enum.KeyCode.S] then m += Vector3.new(0,0, 1) end
+            if keys[Enum.KeyCode.A] then m += Vector3.new(-1,0,0) end
+            if keys[Enum.KeyCode.D] then m += Vector3.new( 1,0,0) end
+            m += Vector3.new(touch.move.X, 0, touch.move.Y)
+            if m.Magnitude > 0 then
+                local hs0 = cam.HeadScale; if hs0 <= 1 then hs0 = S.scale * 60 end
+                local rt = CFrame.fromEulerAnglesYXZ(pitch, yaw, 0)
+                camPos = camPos + (rt * m.Unit) * (100 + S.scale * 4) * hs0 * S.moveK * (S.menuSpeed or 0.1) * dt * math.min(m.Magnitude, 1)
+                headCF = CFrame.new(camPos) * rt
+                if S.ball == nil or not S.ball.vr then cam.CFrame = headCF end
+            end
             return
         end
         if S.menuOpen or isTyping() then return end
@@ -4614,7 +4628,7 @@ task.spawn(function()
             for k in pairs(keys) do keys[k] = false end
         end
 
-        if S.menuOpen then mv = Vector3.zero end   -- opening menu is up: don't fly around
+        if S.menuOpen then mv = S.uiLook and mv * (S.menuSpeed or 0.1) or Vector3.zero end   -- a menu is up: stand still, or creep along (10%) if it hangs in the world
         -- amt is 1 for keys, and less than 1 for a partly pushed joystick
         if S.ball and S.ball.vr then
             camPos, rot = S.ballVR(dt, camPos, rot, mv)   -- Bouncy Ball: the ball decides where the head goes
@@ -7186,6 +7200,7 @@ task.spawn(function()
                     W.roots[#W.roots + 1] = {
                         sg = s, part = part, order = order, t0 = os.clock(),
                         base0 = CFrame.new(c0.Position) * CFrame.Angles(0, math.atan2(-lv.X, -lv.Z), 0),
+                        p = c0.Position, rot0 = CFrame.Angles(0, math.atan2(-lv.X, -lv.Z), 0),
                         veil = 0.06, nobg = opts and opts.nobg, zoom = opts and opts.zoom,
                     }
                     W.count = #W.roots
@@ -7324,7 +7339,8 @@ task.spawn(function()
                     r.tx = (r.tx or 0) + ((r.tgx or 0) - (r.tx or 0)) * sk
                     r.ty = (r.ty or 0) + ((r.tgy or 0) - (r.ty or 0)) * sk
                     local bob = math.sin(os.clock() * 0.9 + r.t0) * 0.07
-                    r.part.CFrame = r.base0 * CFrame.lookAt(Vector3.new(0, 0, -d * (0.75 + 0.25 * ea)), Vector3.zero)
+                    r.p = r.p:Lerp(base.Position, 1 - math.exp(-dt * 3))   -- walking slowly: the panel drifts along with you, same direction
+                    r.part.CFrame = (CFrame.new(r.p) * r.rot0) * CFrame.lookAt(Vector3.new(0, 0, -d * (0.75 + 0.25 * ea)), Vector3.zero)
                         * CFrame.new(0, bob, 0) * CFrame.Angles(-r.ty * 0.05, -r.tx * 0.06, 0)
                     r.w, r.h, r.ea = w * k, h * k, ea
                     if r.sg.CanvasSize.X ~= vs.X or r.sg.CanvasSize.Y ~= vs.Y then r.sg.CanvasSize = Vector2.new(vs.X, vs.Y) end
@@ -17827,7 +17843,7 @@ task.spawn(function()
             veil.Color = Theme.tint(C(46, 20, 112))
             veil.Material = Enum.Material.SmoothPlastic
             veil.Transparency = 0.45
-            local function mkPanel(w, h, cw, ch, theta, yOff)
+            local function mkPanel(w, h, cw, ch, theta, yOff, bare)
                 local part = mkPart(w, h)
                 part.Transparency = 1
                 local sg = Instance.new("SurfaceGui")
@@ -17846,15 +17862,19 @@ task.spawn(function()
                 card.BackgroundTransparency = 0.35
                 card.BorderSizePixel = 0
                 card.Parent = sg
-                corner(card, 26)
-                grad(card, C(70, 30, 150), C(12, 6, 40), 70)
-                stroke(card, C(215, 185, 255), 2, 0.4)
+                if bare then
+                    card.BackgroundTransparency = 1   -- the list's own cards carry the look
+                else
+                    card.BackgroundTransparency = 0.1
+                    corner(card, 22)
+                    grad(card, C(96, 56, 196), C(30, 16, 78), 90)
+                    stroke(card, C(215, 185, 255), 1.5, 0.5)
+                end
                 return { part = part, sg = sg, card = card, w = w, h = h, theta = theta, yOff = yOff, cw = cw, ch = ch }
             end
-            local center = mkPanel(9.6, 12.8, 420, 560, 0, 0)
-            local left = mkPanel(7.3, 9.0, 340, 420, 0.8, -0.4)
-            local right = mkPanel(7.3, 9.0, 340, 420, -0.8, -0.4)
-            local panels = { center, left, right }
+            local center = mkPanel(12.2, 11.4, 600, 560, 0, 0, true)     -- the list
+            local left = mkPanel(7.6, 9.4, 340, 420, 0.95, -0.2)         -- the detail card
+            local panels = { center, left }
 
             local function note(txt)
                 pcall(function() game:GetService("StarterGui"):SetCore("SendNotification", { Title = "Pause menu", Text = txt, Duration = 3 }) end)
@@ -17887,56 +17907,72 @@ task.spawn(function()
                     pcall(function() game:GetService("TeleportService"):Teleport(game.PlaceId, lp) end)
                 end },
             }
-            -- centre panel: title + the six buttons
+            -- list cards (right / centre) + detail card (left), same look as the welcome screen
+            local CARD_T, CARD_B = C(96, 56, 196), C(30, 16, 78)
+            local SUBS = { "Back to the game", "Open the full Start menu", "Fix the VR rig if it got stuck", "Let go of a text box that's eating keys", "Show or hide the controls text", "Join a fresh server" }
+            local ICONS = { "go", "stats", "people", "chat", "m7", "go" }
+            local HINTS = { "Esc", "K", "R", "F", "H", ">" }
             local cs = center.sg
-            local title = lbl(cs, "P A U S E D", 0, 14, 420, 44, 34, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
-            grad(title, C(255, 255, 255), C(190, 150, 255), 0)
-            lbl(cs, "No-VR  |  Edited by @N4THAFTER", 0, 62, 420, 18, 12, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
-            lbl(cs, "v" .. SCRIPT_VERSION, 0, 82, 420, 16, 11, MUTED, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
             local rowObjs = {}
             for i, r in ipairs(ROWS) do
-                local y = 118 + (i - 1) * 70
+                local y = 14 + (i - 1) * 88
                 local holder = Instance.new("Frame")
                 holder.AnchorPoint = Vector2.new(0.5, 0)
-                holder.Position = UDim2.fromOffset(210, y)
-                holder.Size = UDim2.fromOffset(360, 56)
+                holder.Position = UDim2.fromOffset(300 + 70, y + 24)
+                holder.Size = UDim2.fromOffset(560, 72)
+                holder.Rotation = 4
                 holder.BackgroundTransparency = 1
                 holder.Parent = cs
                 local rs = Instance.new("UIScale")
                 rs.Parent = holder
                 local body = Instance.new("CanvasGroup")
                 body.Size = UDim2.fromScale(1, 1)
-                body.BackgroundColor3 = Color3.new(1, 1, 1)
-                body.BackgroundTransparency = r[2] and 1 or 0.84
+                body.BackgroundTransparency = 1
                 body.BorderSizePixel = 0
                 body.Parent = holder
-                corner(body, 16)
-                local sk = stroke(body, C(215, 185, 255), 1.5, 0.45)
-                if r[2] then
-                    local btn = Instance.new("TextButton")
-                    btn.Size = UDim2.fromScale(1, 1)
-                    btn.AutoButtonColor = false
-                    btn.Active = false
-                    btn.BorderSizePixel = 0
-                    btn.Text = ""
-                    btn.BackgroundColor3 = Color3.new(1, 1, 1)
-                    btn.Parent = body
-                    corner(btn, 16)
-                    gradButton(btn, r[1], PINK, VIOLET, 0, 16, 18, Enum.Font.GothamBlack)
-                else
-                    local tl = Instance.new("TextLabel")
-                    tl.Size = UDim2.fromScale(1, 1)
-                    tl.BackgroundTransparency = 1
-                    tl.Font = Enum.Font.GothamBold
-                    tl.TextSize = 16
-                    tl.TextColor3 = WHITE
-                    tl.Text = r[1]
-                    tl.Parent = body
-                end
+                corner(body, 18)
+                local sk = stroke(body, C(215, 185, 255), 1.5, 0.5)
+                local bg = Instance.new("Frame")
+                bg.Size = UDim2.fromScale(1, 1)
+                bg.BackgroundColor3 = Color3.new(1, 1, 1)
+                bg.BackgroundTransparency = 0.1
+                bg.BorderSizePixel = 0
+                bg.Active = false
+                bg.Parent = body
+                grad(bg, CARD_T, CARD_B, 90)
+                local strip = Instance.new("Frame")
+                strip.Position = UDim2.fromOffset(0, 10)
+                strip.Size = UDim2.fromOffset(6, 52)
+                strip.BackgroundColor3 = r[2] and PINK or C(200, 160, 255)
+                strip.BackgroundTransparency = r[2] and 0.1 or 0.65
+                strip.BorderSizePixel = 0
+                strip.Parent = body
+                corner(strip, 3)
+                local th = Instance.new("Frame")
+                th.Position = UDim2.fromOffset(18, 10)
+                th.Size = UDim2.fromOffset(86, 52)
+                th.BackgroundColor3 = Color3.new(1, 1, 1)
+                th.BorderSizePixel = 0
+                th.Parent = body
+                corner(th, 10)
+                grad(th, r[2] and PINK or C(110, 100, 230), C(24, 12, 60), 60)
+                stroke(th, C(215, 185, 255), 1, 0.5)
+                drawIcon(th, ICONS[i])
+                lbl(body, r[1], 120, 12, 330, 26, 20, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Left)
+                lbl(body, SUBS[i], 120, 42, 330, 20, 13, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Left)
+                local hb = Instance.new("Frame")
+                hb.Position = UDim2.fromOffset(560 - 66, 20)
+                hb.Size = UDim2.fromOffset(44, 32)
+                hb.BackgroundTransparency = 1
+                hb.BorderSizePixel = 0
+                hb.Parent = body
+                corner(hb, 8)
+                stroke(hb, C(215, 185, 255), 1.5, 0.45)
+                lbl(hb, HINTS[i], 0, 0, 44, 32, 12, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
                 local sweep = Instance.new("Frame")
                 sweep.AnchorPoint = Vector2.new(0.5, 0.5)
                 sweep.Position = UDim2.new(0, -60, 0.5, 0)
-                sweep.Size = UDim2.fromOffset(60, 120)
+                sweep.Size = UDim2.fromOffset(60, 140)
                 sweep.Rotation = 25
                 sweep.BackgroundColor3 = Color3.new(1, 1, 1)
                 sweep.BorderSizePixel = 0
@@ -17945,33 +17981,90 @@ task.spawn(function()
                 local swg = Instance.new("UIGradient")
                 swg.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0.75), NumberSequenceKeypoint.new(1, 1) })
                 swg.Parent = sweep
-                rowObjs[i] = { rs = rs, body = body, sk = sk, sweep = sweep, primary = r[2], y = y }
+                rowObjs[i] = { rs = rs, body = body, bg = bg, sk = sk, strip = strip, sweep = sweep, primary = r[2], y = y, holder = holder, base = r[2] and 0.1 or 0.1 }
+                task.delay(0.35 + i * 0.07, function()   -- fly in with a slight lean
+                    if holder.Parent then tw(holder, 0.75, { Position = UDim2.fromOffset(300, y), Rotation = (i % 2 == 0) and 0.7 or -0.6 }, Enum.EasingStyle.Back) end
+                end)
             end
             local function rowEnter(o)
-                tw(o.rs, 0.35, { Scale = 1.05 }, Enum.EasingStyle.Back)
-                if not o.primary then tw(o.body, 0.3, { BackgroundTransparency = 0.68 }, Enum.EasingStyle.Quad) end
+                tw(o.rs, 0.35, { Scale = 1.04 }, Enum.EasingStyle.Back)
+                tw(o.bg, 0.25, { BackgroundTransparency = 0 }, Enum.EasingStyle.Quad)
                 tw(o.sk, 0.3, { Transparency = 0.05 }, Enum.EasingStyle.Quad)
+                tw(o.strip, 0.25, { BackgroundTransparency = 0 })
                 o.sweep.Position = UDim2.new(0, -60, 0.5, 0)
                 tw(o.sweep, 0.7, { Position = UDim2.new(1, 60, 0.5, 0) }, Enum.EasingStyle.Quad)
             end
             local function rowLeave(o)
                 tw(o.rs, 0.4, { Scale = 1 }, Enum.EasingStyle.Back)
-                if not o.primary then tw(o.body, 0.3, { BackgroundTransparency = 0.84 }, Enum.EasingStyle.Quad) end
-                tw(o.sk, 0.3, { Transparency = 0.45 }, Enum.EasingStyle.Quad)
+                tw(o.bg, 0.3, { BackgroundTransparency = 0.1 }, Enum.EasingStyle.Quad)
+                tw(o.sk, 0.3, { Transparency = 0.5 }, Enum.EasingStyle.Quad)
+                tw(o.strip, 0.3, { BackgroundTransparency = o.primary and 0.1 or 0.65 })
             end
-            -- left panel: what this is
+
+            -- detail card
             local ls = left.sg
-            lbl(ls, "VR HANDS", 0, 22, 340, 30, 24, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
-            local info = {
-                "No-VR  |  Edited by @N4THAFTER", "Version " .. SCRIPT_VERSION, "",
-                "Mouse - look around", "W A S D - fly", "Space / Shift - up / down", "Left Alt - free cursor",
-            }
-            for i, tx in ipairs(info) do lbl(ls, tx, 0, 70 + (i - 1) * 28, 340, 20, 13, i <= 2 and WHITE or MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center) end
-            -- right panel: shortcuts
-            local rp = right.sg
-            lbl(rp, "SHORTCUTS", 0, 22, 340, 30, 24, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
-            local keysT = { "`  /  Pause  -  this menu", "Ctrl + K  /  Home  -  full menu", "Right Ctrl  -  key HUD", "Esc  -  leave this menu", "", "Aim with the crosshair,", "click to choose" }
-            for i, tx in ipairs(keysT) do lbl(rp, tx, 0, 70 + (i - 1) * 28, 340, 20, 13, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center) end
+            local lacc = Instance.new("Frame")
+            lacc.Position = UDim2.fromOffset(22, 0)
+            lacc.Size = UDim2.new(1, -44, 0, 4)
+            lacc.BackgroundColor3 = Color3.new(1, 1, 1)
+            lacc.BorderSizePixel = 0
+            lacc.Parent = ls
+            corner(lacc, 2)
+            grad(lacc, PINK, C(255, 160, 230), 0)
+            lbl(ls, "P A U S E D", 0, 22, 340, 30, 24, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+            local ldv = Instance.new("Frame")
+            ldv.Position = UDim2.fromOffset(50, 64)
+            ldv.Size = UDim2.fromOffset(240, 1)
+            ldv.BackgroundColor3 = Color3.new(1, 1, 1)
+            ldv.BackgroundTransparency = 0.7
+            ldv.BorderSizePixel = 0
+            ldv.Parent = ls
+            local badge = Instance.new("Frame")
+            badge.Position = UDim2.fromOffset(120, 80)
+            badge.Size = UDim2.fromOffset(100, 100)
+            badge.BackgroundColor3 = Color3.new(1, 1, 1)
+            badge.BackgroundTransparency = 0.86
+            badge.BorderSizePixel = 0
+            badge.Parent = ls
+            corner(badge, 50)
+            stroke(badge, C(215, 185, 255), 2, 0.35)
+            local bt = lbl(badge, "VR", 0, 0, 100, 100, 34, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+            grad(bt, C(255, 255, 255), C(190, 150, 255), 90)
+            local ld = lbl(ls, "The menu is open. Aim at a card with the crosshair and click it.", 30, 192, 280, 40, 14, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+            ld.TextWrapped = true
+            ld.TextTruncate = Enum.TextTruncate.None
+            ld.TextYAlignment = Enum.TextYAlignment.Top
+            local lchip = Instance.new("Frame")
+            lchip.Position = UDim2.fromOffset(110, 240)
+            lchip.Size = UDim2.fromOffset(120, 28)
+            lchip.BackgroundColor3 = Color3.new(1, 1, 1)
+            lchip.BackgroundTransparency = 0.84
+            lchip.BorderSizePixel = 0
+            lchip.Parent = ls
+            corner(lchip, 14)
+            stroke(lchip, GREEN, 1.2, 0.35)
+            local lct = lbl(lchip, "Menu open", 0, 0, 120, 28, 13, GREEN, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+            lct:SetAttribute("tc", true)
+            lbl(ls, "v" .. SCRIPT_VERSION .. "   |   No-VR   |   @N4THAFTER", 0, 280, 340, 18, 12, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+            local keysT = { "`  /  Pause  -  this menu", "Ctrl + K  /  Home  -  full menu", "Right Ctrl  -  key HUD", "Esc  -  leave this menu" }
+            for i, tx in ipairs(keysT) do lbl(ls, tx, 0, 314 + (i - 1) * 24, 340, 20, 13, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center) end
+
+            -- the opening flash
+            do
+                local bloom = Instance.new("Frame")
+                bloom.AnchorPoint = Vector2.new(0.5, 0.5)
+                bloom.Position = UDim2.fromScale(0.5, 0.5)
+                bloom.Size = UDim2.fromOffset(0, 0)
+                bloom.BackgroundColor3 = Theme.tint(C(235, 215, 255))
+                bloom.BackgroundTransparency = 0.15
+                bloom.BorderSizePixel = 0
+                bloom.Active = false
+                bloom:SetAttribute("tc", true)
+                bloom.Parent = g
+                corner(bloom, 4000)
+                tw(bloom, 0.8, { Size = UDim2.fromOffset(2600, 2600), BackgroundTransparency = 1 }, Enum.EasingStyle.Quad)
+                task.delay(0.9, function() bloom:Destroy() end)
+            end
 
             -- crosshair + hint (on screen)
             local ring = Instance.new("Frame")
@@ -18012,8 +18105,9 @@ task.spawn(function()
                 task.delay(0.6, function() dof:Destroy() end)
                 pcall(function() UIS.MouseIconEnabled = true end)
             end
-            rc = RunService.RenderStepped:Connect(function()
+            rc = RunService.RenderStepped:Connect(function(dtp)
                 if not folder.Parent then done() return end
+                base0 = CFrame.new(base0.Position:Lerp(cam.CFrame.Position, 1 - math.exp(-(dtp or 0.016) * 3))) * (base0 - base0.Position)
                 if pauseGui ~= g and not closingAt then closingAt = os.clock() end
                 local a = closingAt and (1 - (os.clock() - closingAt) / 0.35) or (((os.clock() - t0) / 0.9))
                 if closingAt and a <= 0 then done() return end
@@ -18048,7 +18142,7 @@ task.spawn(function()
                             if math.abs(l.X) <= w / 2 and math.abs(l.Y) <= h / 2 then
                                 local px, py = (0.5 - l.X / w) * center.cw, (0.5 - l.Y / h) * center.ch
                                 for i, o in ipairs(rowObjs) do
-                                    if px >= 30 and px <= 390 and py >= o.y and py <= o.y + 56 then newIdx = i break end
+                                    if px >= 20 and px <= 580 and py >= o.y and py <= o.y + 72 then newIdx = i break end
                                 end
                             end
                         end
@@ -20607,14 +20701,24 @@ task.spawn(function()
                 softFade(shadow, true, 0.6)
                 local cg = Instance.new("CanvasGroup")
                 cg.Size = UDim2.fromOffset(W, H)
-                cg.BackgroundColor3 = C(30, 18, 62)
-                cg.BackgroundTransparency = 0.06
+                cg.BackgroundColor3 = Color3.new(1, 1, 1)
+                cg.BackgroundTransparency = 1
                 cg.BorderSizePixel = 0
                 cg.GroupTransparency = 1
+                cg.Rotation = 3
                 cg.ZIndex = 2
                 cg.Parent = holder
                 corner(cg, 16)
-                stroke(cg, Color3.new(1, 1, 1), 1, 0.86)
+                stroke(cg, C(215, 185, 255), 1.5, 0.5)
+                local gbg = Instance.new("Frame")   -- the glass body of the card
+                gbg.Size = UDim2.fromScale(1, 1)
+                gbg.BackgroundColor3 = Color3.new(1, 1, 1)
+                gbg.BackgroundTransparency = 0.08
+                gbg.BorderSizePixel = 0
+                gbg.Active = false
+                gbg.Parent = cg
+                grad(gbg, C(96, 56, 196), C(30, 16, 78), 90)
+                tw(cg, 0.8, { Rotation = -0.6 }, Enum.EasingStyle.Back)
                 local cs = Instance.new("UIScale")
                 cs.Scale = 0.94
                 cs.Parent = cg
@@ -20623,8 +20727,8 @@ task.spawn(function()
                 local acc = Instance.new("Frame")
                 acc.AnchorPoint = Vector2.new(0.5, 0)
                 acc.Position = UDim2.new(0.5, 0, 0, 0)
-                acc.Size = UDim2.new(1, -28, 0, 2)
-                acc.BackgroundColor3 = C(124, 56, 255)
+                acc.Size = UDim2.new(1, -28, 0, 3)
+                acc.BackgroundColor3 = PINK
                 acc.BorderSizePixel = 0
                 acc.ZIndex = 6
                 acc.Parent = cg
@@ -20642,7 +20746,7 @@ task.spawn(function()
                 corner(ib, 12)
                 stroke(ib, Color3.new(1, 1, 1), 1, 0.78)
                 drawIcon(ib, o.icon or "help")
-                lbl(cg, o.title, 76, 18, 270, 18, 12, WHITE, Enum.Font.GothamBlack)
+                lbl(cg, (string.upper(o.title):gsub(".", "%0 ")), 76, 18, 280, 18, 11, WHITE, Enum.Font.GothamBlack)
                 local sub = lbl(cg, o.sub, 76, 37, 262, 32, 11, MUTED, Enum.Font.GothamMedium)
                 sub.TextWrapped = true
                 sub.TextTruncate = Enum.TextTruncate.None
