@@ -50,7 +50,7 @@ local UPDATE_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR
 --   2.0.4 -> 2.0.5 ... 2.0.12 -> 2.1.0 ... 2.1.12 -> 2.2.0 ... 2.12.12 -> 3.0.0
 -- Your Discord/status feed ("version" in status.json) should use the same pattern, and the script
 -- compares versions as NUMBERS (so 2.0.12 is newer than 2.0.4, and 2.1.0 is newer than 2.0.12).
-local SCRIPT_VERSION = "2.1.10"
+local SCRIPT_VERSION = "2.1.11"
 -- Optional: RAW link to a small JSON file YOU host. It feeds the Banwave / Key system / Script rows.
 -- Leave "" to skip. Example file:
 --   { "banwave": "clear", "banwave_note": "No wave reported",
@@ -117,6 +117,23 @@ local UIS         = game:GetService("UserInputService")
 local RunService  = game:GetService("RunService")
 local Players     = game:GetService("Players")
 local identity    = CFrame.identity
+-- a loop over a missing table is skipped instead of throwing; the first one is written to NoVR_niltable.txt
+local rawPairs, rawIpairs = pairs, ipairs
+local pairs, ipairs
+do
+    local logged = 0
+    local function note(fn)
+        logged = logged + 1
+        if logged <= 3 then
+            pcall(function()
+                if appendfile then appendfile("NoVR_niltable.txt", os.date() .. "  " .. fn .. "(nil)\\n" .. debug.traceback() .. "\\n\\n") end
+            end)
+        end
+    end
+    local function none() return nil end
+    pairs  = function(t) if t == nil then note("pairs") return none end return rawPairs(t) end
+    ipairs = function(t) if t == nil then note("ipairs") return none end return rawIpairs(t) end
+end
 -- every download goes through here: a missing / non-web link is skipped instead of making HttpGet throw an error
 local function hget(url, nc)
     if type(url) ~= "string" or not string.match(url, "^https?://") then
@@ -1545,6 +1562,10 @@ task.spawn(function()
         for _, n in ipairs({ "NoVR_Mobile", "NoVR_MobileToggle", "NoVR_HUD", "NoVR_StartToggle", "NoVR_Start" }) do
             Theme.recolor(pg:FindFirstChild(n))
         end
+        if S.world then
+            for _, r in ipairs(S.world.roots) do pcall(Theme.recolor, r.sg) end
+            for _, r in ipairs(S.world.fols) do pcall(Theme.recolor, r.sg) end
+        end
     end
     -- the touch HUD / PC menu were built before any theme existed, so give them a
     -- baseline snapshot a few seconds after load
@@ -1553,6 +1574,9 @@ task.spawn(function()
         if not pg then return end
         for _, n in ipairs({ "NoVR_Mobile", "NoVR_MobileToggle", "NoVR_HUD", "NoVR_StartToggle" }) do
             Theme.recolor(pg:FindFirstChild(n))
+        end
+        if S.world then
+            for _, r in ipairs(S.world.fols) do pcall(Theme.recolor, r.sg) end
         end
     end)
 
@@ -2228,7 +2252,7 @@ task.spawn(function()
             Input.lIndex = (mouseDown.L or keys[Enum.KeyCode.Q]) and 1 or 0
         end
         if not anyPoseLocked("R") then
-            Input.rIndex = (mouseDown.R or keys[Enum.KeyCode.E]) and 1 or 0
+            Input.rIndex = (mouseDown.R or (keys[Enum.KeyCode.E] and not S.eSuppress)) and 1 or 0
         end
     end
     -- =====================================
@@ -4294,7 +4318,7 @@ task.spawn(function()
 
         if io.UserInputType == Enum.UserInputType.Keyboard then
             keys[io.KeyCode] = true
-            if io.KeyCode == Enum.KeyCode.LeftAlt then setLook(not S.look) end
+            if io.KeyCode == Enum.KeyCode.LeftAlt then if S.world and S.world.count > 0 then S.world.free = not S.world.free else setLook(not S.look) end end
             if io.KeyCode == Enum.KeyCode.Equals  then setScale(S.scale + 1) end
             if io.KeyCode == Enum.KeyCode.Minus   then setScale(S.scale - 1) end
 
@@ -4341,7 +4365,8 @@ task.spawn(function()
                 end
             end
 
-            if Input and io.KeyCode == Enum.KeyCode.E then Input.rIndex = 1; Input.rFist = 0; Input.rThumb = 0 end
+            if io.KeyCode == Enum.KeyCode.E then S.eSuppress = false end
+            if Input and io.KeyCode == Enum.KeyCode.E and not S.eSuppress then Input.rIndex = 1; Input.rFist = 0; Input.rThumb = 0 end
             if Input and io.KeyCode == Enum.KeyCode.Q then Input.lIndex = 1; Input.lFist = 0; Input.lThumb = 0 end
             if io.KeyCode == Enum.KeyCode.J and not UIS:GetFocusedTextBox() then trigger.held = true end
 
@@ -4401,6 +4426,7 @@ task.spawn(function()
     local function onInputEnded(io, gameProcessed)
         if io.UserInputType == Enum.UserInputType.Keyboard then
             keys[io.KeyCode] = false
+            if io.KeyCode == Enum.KeyCode.E then S.eSuppress = false end
             if Input and io.KeyCode == Enum.KeyCode.E then Input.rIndex = 0 end
             if Input and io.KeyCode == Enum.KeyCode.Q then Input.lIndex = 0 end
             if io.KeyCode == Enum.KeyCode.J and trigger.held then
@@ -4441,6 +4467,13 @@ task.spawn(function()
     end
 
     function U.emuStep(dt)
+        if S.uiLook and not isTyping() then
+            -- VR-style menu: the mouse turns your head, smoothed (an exponential glide, so the total turn is the same but it never jerks)
+            UIS.MouseBehavior = Enum.MouseBehavior.LockCenter
+            UIS.MouseIconEnabled = false
+            touch.look = Vector2.zero
+            return
+        end
         if S.menuOpen or isTyping() then return end
         local md = UIS:GetMouseDelta()
         if S.handMode then
@@ -4519,6 +4552,10 @@ task.spawn(function()
                 S.lookTurn(touch.look.X, touch.look.Y)
             else
                 local d = md + touch.look
+                if S.smoothLook then   -- optional: glides the turn instead of applying every mouse tick raw
+                    S.smLook = (S.smLook or Vector2.zero):Lerp(d, 1 - math.exp(-dt * 22))
+                    d = S.smLook
+                end
                 S.lookTurn(d.X, d.Y)
             end
             UIS.MouseBehavior = Enum.MouseBehavior.LockCenter
@@ -4943,6 +4980,10 @@ task.spawn(function()
             if type(d.pop.auto) == "boolean" then S.pop.auto = d.pop.auto end
             if type(d.pop.asked) == "boolean" then S.pop.asked = d.pop.asked end
             if type(d.pop.show) == "boolean" then S.pop.show = d.pop.show end
+            if type(d.pop.noAuto) == "boolean" then S.pop.noAuto = d.pop.noAuto end
+            if type(d.pop.flat) == "boolean" then S.pop.flat = d.pop.flat end
+            if type(d.pop.zoom) == "number" and d.pop.zoom >= 0.6 and d.pop.zoom <= 2.5 then S.pop.zoom = d.pop.zoom end
+            if type(d.pop.nosnd) == "boolean" then S.pop.nosnd = d.pop.nosnd end
             if type(d.pop.secs) == "number" and d.pop.secs >= 3 and d.pop.secs <= 30 then S.pop.secs = d.pop.secs end
         end
         if type(d.bar) == "table" then
@@ -6165,6 +6206,21 @@ task.spawn(function()
                 cs.Parent = circle
 
                 local prevHud = true
+                -- A text box that keeps keyboard focus (search box, chat, key box...) makes the script think you are typing,
+                -- which switches movement, looking and the hands off. While the touch controls are open, tapping anywhere
+                -- outside the focused box lets go of it.
+                UIS.InputBegan:Connect(function(io)
+                    if not mobileOpen then return end
+                    if io.UserInputType ~= Enum.UserInputType.Touch and io.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+                    local tb = UIS:GetFocusedTextBox()
+                    if not tb then return end
+                    local okP, p = pcall(screenPos, io)
+                    if not okP or typeof(p) ~= "Vector2" then return end
+                    local ap, as = tb.AbsolutePosition, tb.AbsoluteSize
+                    if p.X < ap.X or p.X > ap.X + as.X or p.Y < ap.Y or p.Y > ap.Y + as.Y then
+                        pcall(function() tb:ReleaseFocus() end)
+                    end
+                end)
                 local function setMobile(on)
                     mobileOpen = on
                     gui.Enabled = on
@@ -6625,6 +6681,8 @@ task.spawn(function()
                 local inset = GuiService:GetGuiInset()
                 return Vector2.new(input.Position.X + inset.X, input.Position.Y + inset.Y)
             end
+            local W = S.world
+            if W and W.count > 0 and W.px then return Vector2.new(W.px, W.py) end   -- aiming at a world panel: canvas coordinates
             return UIS:GetMouseLocation()
         end
         -- soft shadow / glow: stacked rounded frames fade out from the edge (no image needed)
@@ -6924,6 +6982,505 @@ task.spawn(function()
             return holder
         end
 
+
+        do   -- ===== WORLD PANELS: the big screens hang in the world, you turn your head (smoothly) to face the buttons =====
+        local W = { roots = {}, fols = {}, count = 0 }
+        S.world = W
+        local DIST = 13
+        local custom = (firesignal ~= nil) or (getconnections ~= nil)   -- we aim the crosshair ourselves when we can press buttons by script
+        local folder, room, dof, hudg, ring, rst, rsc, ffolder, orbs
+        local sm = Vector2.zero
+        local hovBtn, downBtn, downIo
+        local function fire(sig, ...)
+            local a = { ... }
+            if firesignal then if pcall(firesignal, sig, table.unpack(a)) then return end end
+            if getconnections then
+                local ok, cs = pcall(getconnections, sig)
+                if ok and cs then
+                    for _, c in ipairs(cs) do pcall(function() c:Fire(table.unpack(a)) end) end
+                end
+            end
+        end
+        local function ensure()
+            if folder and folder.Parent then return end
+            folder = Instance.new("Folder")
+            folder.Name = "NoVR_World"
+            folder.Parent = cam
+            room = {}   -- six thin walls around you (a purple room), so wherever you turn the background is there
+            for i = 1, 6 do
+                local v = Instance.new("Part")
+                v.Name = "Room" .. i
+                v.Anchored, v.CanCollide, v.CanQuery, v.CanTouch, v.CastShadow = true, false, false, false, false
+                v.Material = Enum.Material.SmoothPlastic
+                v.Size = Vector3.new(72, 72, 0.2)
+                v.Transparency = 1
+                v.Parent = folder
+                room[i] = v
+            end
+            orbs = {}   -- glowing bubbles floating at different depths: they slide past as you turn, which is what makes the room feel 3D
+            local rng = Random.new(7)
+            for i = 1, 16 do
+                local o = Instance.new("Part")
+                o.Name = "Orb" .. i
+                o.Shape = Enum.PartType.Ball
+                o.Anchored, o.CanCollide, o.CanQuery, o.CanTouch, o.CastShadow = true, false, false, false, false
+                o.Material = Enum.Material.Neon
+                local sz = rng:NextNumber(0.8, 3.2)
+                o.Size = Vector3.new(sz, sz, sz)
+                o.Transparency = 1
+                o.Parent = folder
+                local dir = Vector3.new(rng:NextNumber(-1, 1), rng:NextNumber(-0.5, 0.7), rng:NextNumber(-1, 1))
+                if dir.Magnitude < 0.2 then dir = Vector3.new(1, 0, 0) end
+                orbs[i] = { p = o, tr = rng:NextNumber(0.55, 0.85), dir = dir.Unit, rad = rng:NextNumber(12, 30), ph = rng:NextNumber(0, 6.28), sp = rng:NextNumber(0.2, 0.6) }
+            end
+            local od = Lighting:FindFirstChild("NoVR_WorldDoF")
+            if od then od:Destroy() end
+            dof = Instance.new("DepthOfFieldEffect")
+            dof.Name = "NoVR_WorldDoF"
+            dof.FocusDistance = DIST
+            dof.InFocusRadius = 3
+            dof.NearIntensity = 0
+            dof.FarIntensity = 0
+            dof.Parent = Lighting
+            tw(dof, 0.8, { NearIntensity = 1, FarIntensity = 1 }, Enum.EasingStyle.Sine)
+            local oh = lp:WaitForChild("PlayerGui"):FindFirstChild("NoVR_WorldHUD")
+            if oh then oh:Destroy() end
+            hudg = Instance.new("ScreenGui")
+            hudg.Name = "NoVR_WorldHUD"
+            hudg.ResetOnSpawn = false
+            hudg.IgnoreGuiInset = true
+            pcall(function() hudg.ScreenInsets = Enum.ScreenInsets.None end)
+            pcall(function() hudg.ScreenInsets = Enum.ScreenInsets.None end)
+            hudg.DisplayOrder = 600
+            hudg.Parent = lp:WaitForChild("PlayerGui")
+            ring = Instance.new("Frame")
+            ring.AnchorPoint = Vector2.new(0.5, 0.5)
+            ring.Position = UDim2.fromScale(0.5, 0.5)
+            ring.Size = UDim2.fromOffset(26, 26)
+            ring.BackgroundTransparency = 1
+            ring.Parent = hudg
+            corner(ring, 26)
+            rst = stroke(ring, WHITE, 2, 0.1)
+            rsc = Instance.new("UIScale")
+            rsc.Parent = ring
+            local dot = Instance.new("Frame")
+            dot.AnchorPoint = Vector2.new(0.5, 0.5)
+            dot.Position = UDim2.fromScale(0.5, 0.5)
+            dot.Size = UDim2.fromOffset(4, 4)
+            dot.BackgroundColor3 = WHITE
+            dot.BorderSizePixel = 0
+            dot.Parent = hudg
+            corner(dot, 4)
+        end
+        local function teardown()
+            local f, d, h = folder, dof, hudg
+            folder, dof, hudg, ring, room, orbs = nil, nil, nil, nil, nil, nil
+            if f then f:Destroy() end
+            if h then h:Destroy() end
+            if d then
+                tw(d, 0.5, { NearIntensity = 0, FarIntensity = 0 }, Enum.EasingStyle.Sine)
+                task.delay(0.6, function() d:Destroy() end)
+            end
+            hovBtn, downBtn = nil, nil
+            S.uiLook = false
+            pcall(function() UIS.MouseIconEnabled = true end)
+            if S.look then pcall(setLook, true) end
+        end
+        -- the top-to-bottom ZIndex path of an object inside a root (to find which of two overlapping buttons is on top)
+        local function pathOf(o, root)
+            local p, n = {}, 0
+            local x = o
+            while x and x ~= root do
+                if x:IsA("GuiObject") then n = n + 1 p[n] = x.ZIndex end
+                x = x.Parent
+            end
+            local rev = {}
+            for i = n, 1, -1 do rev[#rev + 1] = p[i] end
+            return rev
+        end
+        local function above(a, b)
+            for i = 1, math.max(#a, #b) do
+                local x, y = a[i] or -1, b[i] or -1
+                if x ~= y then return x > y end
+            end
+            return false
+        end
+        local function inside(o, px, py)
+            local ap, as = o.AbsolutePosition, o.AbsoluteSize
+            return px >= ap.X and px <= ap.X + as.X and py >= ap.Y and py <= ap.Y + as.Y
+        end
+        -- is this point really on the object (every parent visible and not clipping it away)?
+        local function reachable(o, root, px, py)
+            local x = o.Parent
+            while x and x ~= root do
+                if x:IsA("GuiObject") then
+                    if not x.Visible then return false end
+                    if x:IsA("CanvasGroup") and x.GroupTransparency >= 0.98 then return false end
+                    if (x.ClipsDescendants or x:IsA("ScrollingFrame") or x:IsA("CanvasGroup")) and not inside(x, px, py) then return false end
+                end
+                x = x.Parent
+            end
+            return true
+        end
+        local function refresh(r)
+            r.btns, r.scrs = {}, {}
+            for _, d in ipairs(r.sg:GetDescendants()) do
+                if d:IsA("GuiButton") or d:IsA("TextBox") then r.btns[#r.btns + 1] = d
+                elseif d:IsA("ScrollingFrame") then r.scrs[#r.scrs + 1] = d end
+            end
+            r.at = os.clock()
+        end
+        local function bestAt(r, px, py)
+            if not r.btns or os.clock() - r.at > 0.35 then refresh(r) end
+            local best, bp
+            for _, b in ipairs(r.btns) do
+                if b.Parent and b.Visible and (b:IsA("TextBox") or b.Active) and inside(b, px, py) and reachable(b, r.sg, px, py) then
+                    local p = pathOf(b, r.sg)
+                    if not best or above(p, bp) or (not above(bp, p) and true) then best, bp = b, p end
+                end
+            end
+            return best
+        end
+        local function scrollAt(r, px, py)
+            if not r.scrs or os.clock() - (r.at or 0) > 0.35 then refresh(r) end
+            local best, bd = nil, -1
+            for _, s in ipairs(r.scrs or {}) do
+                if s.Parent and s.Visible and inside(s, px, py) and reachable(s, r.sg, px, py) then
+                    local d = 0
+                    local x = s
+                    while x and x ~= r.sg do d = d + 1 x = x.Parent end
+                    if d > bd then best, bd = s, d end
+                end
+            end
+            return best
+        end
+        local function easeBack(a) return 1 + 2.70158 * (a - 1) ^ 3 + 1.70158 * (a - 1) ^ 2 end
+
+        function S.mkRoot(name, order, parent, blurFx, opts)
+            if not IS_MOBILE and not _G.NoVR_UI2D and not S.pop.flat then
+                local ok, sg = pcall(function()
+                    ensure()
+                    local c0 = cam.CFrame
+                    local lv = c0.LookVector
+                    local part = Instance.new("Part")
+                    part.Name = name .. "_Panel"
+                    part.Anchored, part.CanCollide, part.CanQuery, part.CanTouch, part.CastShadow = true, false, false, false, false
+                    part.Transparency = 1
+                    part.CanQuery = not custom
+                    part.Size = Vector3.new(10, 6, 0.1)
+                    part.Parent = folder
+                    local s = Instance.new("SurfaceGui")
+                    s.Name = name
+                    s.Face = Enum.NormalId.Front
+                    s.SizingMode = Enum.SurfaceGuiSizingMode.FixedSize
+                    local vs = cam.ViewportSize
+                    s.CanvasSize = Vector2.new(vs.X, vs.Y)
+                    s.AlwaysOnTop = true
+                    s.LightInfluence = 0
+                    s.Brightness = 1
+                    s.ResetOnSpawn = false
+                    s.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+                    if custom then pcall(function() s.Active = false end) end
+                    s.Adornee = part
+                    s.Parent = part
+                    W.roots[#W.roots + 1] = {
+                        sg = s, part = part, order = order, t0 = os.clock(),
+                        base0 = CFrame.new(c0.Position) * CFrame.Angles(0, math.atan2(-lv.X, -lv.Z), 0),
+                        veil = 0.06, nobg = opts and opts.nobg, zoom = opts and opts.zoom,
+                    }
+                    W.count = #W.roots
+                    S.uiLook = true
+                    S.uiSm = Vector2.zero
+                    return s
+                end)
+                if ok and sg then
+                    if blurFx then pcall(function() blurFx.Enabled = false end) end   -- the depth-of-field blur takes over (a screen blur would blur the panel too)
+                    return sg
+                end
+                warn("[NoVR] 3D screen failed (" .. tostring(sg) .. "), using the flat one")
+            end
+            local g = Instance.new("ScreenGui")
+            g.Name = name
+            g.ResetOnSpawn = false
+            g.IgnoreGuiInset = true
+            pcall(function() g.ScreenInsets = Enum.ScreenInsets.None end)
+            pcall(function() g.ScreenInsets = Enum.ScreenInsets.None end)
+            g.DisplayOrder = order
+            g.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+            g.Parent = parent
+            return g
+        end
+
+        -- panels that follow your head (bar, pop-ups, toasts): they glide after your view instead of being nailed to the screen
+        function S.mkFollow(name, order, parent, zoom)
+            if not IS_MOBILE and not _G.NoVR_UI2D and not S.pop.flat then
+                local ok, sg = pcall(function()
+                    if not (ffolder and ffolder.Parent) then
+                        ffolder = Instance.new("Folder")
+                        ffolder.Name = "NoVR_Follow"
+                        ffolder.Parent = cam
+                    end
+                    local part = Instance.new("Part")
+                    part.Name = name .. "_Panel"
+                    part.Anchored, part.CanCollide, part.CanTouch, part.CastShadow = true, false, false, false
+                    part.CanQuery = not custom   -- when we can't press buttons by script, Roblox's own SurfaceGui input has to hit the panel
+                    part.Transparency = 1
+                    part.Size = Vector3.new(10, 6, 0.1)
+                    part.Parent = ffolder
+                    local s = Instance.new("SurfaceGui")
+                    s.Name = name
+                    s.Face = Enum.NormalId.Front
+                    s.SizingMode = Enum.SurfaceGuiSizingMode.FixedSize
+                    local vs = cam.ViewportSize
+                    s.CanvasSize = Vector2.new(vs.X, vs.Y)
+                    s.AlwaysOnTop = true
+                    s.LightInfluence = 0
+                    s.Brightness = 1
+                    s.ResetOnSpawn = false
+                    s.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+                    if custom then pcall(function() s.Active = false end) end
+                    s.Adornee = part
+                    s.Parent = part
+                    W.fols[#W.fols + 1] = { sg = s, part = part, order = order, cf = cam.CFrame, ea = 1, zoom = zoom }
+                    return s
+                end)
+                if ok and sg then return sg end
+                warn("[NoVR] following panel failed (" .. tostring(sg) .. "), using the flat one")
+            end
+            local g = Instance.new("ScreenGui")
+            g.Name = name
+            g.ResetOnSpawn = false
+            g.IgnoreGuiInset = true
+            pcall(function() g.ScreenInsets = Enum.ScreenInsets.None end)
+            pcall(function() g.ScreenInsets = Enum.ScreenInsets.None end)
+            g.DisplayOrder = order
+            g.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+            g.Parent = parent
+            return g
+        end
+        local SoundSvc = game:GetService("SoundService")
+        local function snd(id, vol)
+            if S.pop.nosnd then return end
+            pcall(function()
+                local so = Instance.new("Sound")
+                so.SoundId = id
+                so.Volume = vol
+                so.Parent = SoundSvc
+                so:Play()
+                task.delay(2, function() so:Destroy() end)
+            end)
+        end
+        local function planeHit(r, o, d)
+            local pcf = r.part.CFrame
+            local n = pcf.LookVector
+            local dn = d:Dot(n)
+            if math.abs(dn) < 1e-4 then return nil end
+            local tt = (pcf.Position - o):Dot(n) / dn
+            if tt <= 0 then return nil end
+            local l = pcf:PointToObjectSpace(o + d * tt)
+            if math.abs(l.X) > r.w / 2 or math.abs(l.Y) > r.h / 2 then return nil end
+            return (0.5 - l.X / r.w) * r.sg.CanvasSize.X, (0.5 - l.Y / r.h) * r.sg.CanvasSize.Y
+        end
+        local ROOMDIR = { Vector3.xAxis, -Vector3.xAxis, Vector3.yAxis, -Vector3.yAxis, Vector3.zAxis, -Vector3.zAxis }
+        local ROOMCOL = { C(30, 12, 80), C(30, 12, 80), C(30, 12, 80), C(30, 12, 80), C(30, 12, 80), C(30, 12, 80) }   -- one colour on all six walls, so the corners / edges can't be seen
+
+        RunService.RenderStepped:Connect(function(dt)
+            -- 1) head turning: the mouse turns your view (smoothed), the panels never move
+            if W.free and W.count == 0 then W.free = false end
+            if hudg then hudg.Enabled = not W.free end
+            if W.free then   -- Alt: the real cursor is back, click the panel with it (Alt again to go back to head-turning)
+                sm = Vector2.zero
+                UIS.MouseBehavior = Enum.MouseBehavior.Default
+                UIS.MouseIconEnabled = true
+            elseif S.uiLook and not UIS:GetFocusedTextBox() then
+                local md = UIS:GetMouseDelta()
+                sm = sm:Lerp(md, 1 - math.exp(-dt * 16))
+                S.lookTurn(sm.X, sm.Y)
+                UIS.MouseBehavior = Enum.MouseBehavior.LockCenter
+                UIS.MouseIconEnabled = false
+            else
+                sm = Vector2.zero
+            end
+            -- 2) place the panels
+            local base = cam.CFrame
+            local vs = cam.ViewportSize
+            local tanH = math.tan(math.rad(cam.FieldOfView) / 2)
+            local top, veilT, anyBg = nil, 1, false
+            for i = #W.roots, 1, -1 do
+                local r = W.roots[i]
+                if not r.sg.Parent then
+                    r.part:Destroy()
+                    table.remove(W.roots, i)
+                else
+                    local ea = easeBack(math.clamp((os.clock() - r.t0) / 0.6, 0, 1))
+                    local d = DIST - (r.order - 100) * 0.01
+                    local zs = r.zoom and math.clamp(S.pop.zoom or 1.5, 0.6, 2.5) or 1   -- "3D menu size"
+                    local h = 2 * d * tanH * 0.84 * zs
+                    local w = h * vs.X / math.max(vs.Y, 1)
+                    local k = 0.85 + 0.15 * ea
+                    r.part.Size = Vector3.new(w * k, h * k, 0.1)
+                    -- the panel leans a little toward where you are aiming and bobs gently, so it feels like a real object
+                    local sk = 1 - math.exp(-dt * 6)
+                    r.tx = (r.tx or 0) + ((r.tgx or 0) - (r.tx or 0)) * sk
+                    r.ty = (r.ty or 0) + ((r.tgy or 0) - (r.ty or 0)) * sk
+                    local bob = math.sin(os.clock() * 0.9 + r.t0) * 0.07
+                    r.part.CFrame = r.base0 * CFrame.lookAt(Vector3.new(0, 0, -d * (0.75 + 0.25 * ea)), Vector3.zero)
+                        * CFrame.new(0, bob, 0) * CFrame.Angles(-r.ty * 0.05, -r.tx * 0.06, 0)
+                    r.w, r.h, r.ea = w * k, h * k, ea
+                    if r.sg.CanvasSize.X ~= vs.X or r.sg.CanvasSize.Y ~= vs.Y then r.sg.CanvasSize = Vector2.new(vs.X, vs.Y) end
+                    if not top or r.order > top.order then top = r end
+                    if not r.nobg then veilT = math.min(veilT, r.veil) anyBg = true end   -- the Start menu hangs alone: no room, no blur, no bubbles
+                end
+            end
+            -- the following panels glide after your head
+            local fl = S.pop.flat and 1 or (1 - math.exp(-dt * 5))
+            for i = #W.fols, 1, -1 do
+                local r = W.fols[i]
+                if not r.sg.Parent then
+                    r.part:Destroy()
+                    table.remove(W.fols, i)
+                else
+                    local c = r.cf:Lerp(base, fl)
+                    r.cf = CFrame.new(base.Position) * (c - c.Position)
+                    local d = 10.5 - r.order * 0.0005
+                    local zs = (r.zoom and not S.pop.flat) and math.min(math.clamp(S.pop.zoom or 1.5, 0.6, 2.5), 1.15) or 1   -- "3D menu size": the panel is just made larger
+                    local h = 2 * d * tanH * zs
+                    local w = h * vs.X / math.max(vs.Y, 1)
+                    r.part.Size = Vector3.new(w, h, 0.1)
+                    r.part.CFrame = r.cf * CFrame.new(0, 0, -d) * CFrame.Angles(0, math.pi, 0)
+                    r.w, r.h = w, h
+                    if r.sg.CanvasSize.X ~= vs.X or r.sg.CanvasSize.Y ~= vs.Y then r.sg.CanvasSize = Vector2.new(vs.X, vs.Y) end
+                end
+            end
+            W.count = #W.roots
+            if W.count == 0 then
+                if folder then teardown() end
+            else
+                S.uiLook = true
+                if dof then dof.Enabled = anyBg end
+                if room then
+                    local cp = base.Position
+                    local tr = anyBg and (1 - (1 - veilT) * math.clamp((os.clock() - top.t0) / 0.6, 0, 1)) or 1
+                    for i, v in ipairs(room) do
+                        v.CFrame = CFrame.lookAt(cp + ROOMDIR[i] * 34, cp)
+                        v.Color = Theme.tint(ROOMCOL[i])
+                        v.Transparency = tr
+                    end
+                    if orbs then
+                        local tn = os.clock()
+                        local oc = Theme.tint(C(170, 110, 255))
+                        for _, o in ipairs(orbs) do
+                            local a = tn * o.sp + o.ph
+                            o.p.CFrame = CFrame.new(cp + o.dir * (o.rad + math.sin(a) * 1.5) + Vector3.new(0, math.cos(a * 1.3) * 1.2, 0))
+                            o.p.Color = oc
+                            o.p.Transparency = anyBg and o.tr or 1
+                        end
+                    end
+                end
+            end
+            -- 3) what is under the crosshair (menus) or under the free cursor (following panels)?
+            local hit, px, py, pr
+            if W.count > 0 then
+                if W.free then
+                    local ml = UIS:GetMouseLocation()
+                    local ray = cam:ViewportPointToRay(ml.X, ml.Y)
+                    px, py = planeHit(top, ray.Origin, ray.Direction)
+                else
+                    px, py = planeHit(top, base.Position, base.LookVector)
+                end
+                pr = top
+                if px and top.ea > 0.8 and custom then hit = bestAt(top, px, py) end
+            elseif custom and #W.fols > 0 and UIS.MouseBehavior ~= Enum.MouseBehavior.LockCenter then
+                local ml = UIS:GetMouseLocation()
+                local ray = cam:ViewportPointToRay(ml.X, ml.Y)
+                local list = {}
+                for _, r in ipairs(W.fols) do
+                    if r.sg.Enabled then list[#list + 1] = r end
+                end
+                table.sort(list, function(a, b) return a.order > b.order end)
+                for _, r in ipairs(list) do
+                    local x, y = planeHit(r, ray.Origin, ray.Direction)
+                    if x then
+                        local b = bestAt(r, x, y)
+                        if b then hit, px, py, pr = b, x, y, r break end
+                        if not pr then px, py, pr = x, y, r end
+                    end
+                end
+            end
+            W.px, W.py, W.top = px, py, pr
+            for _, r in ipairs(W.roots) do r.tgx, r.tgy = 0, 0 end
+            if W.count > 0 and px and pr then
+                pr.tgx = math.clamp((px / math.max(pr.sg.CanvasSize.X, 1) - 0.5) * 2, -1, 1)
+                pr.tgy = math.clamp((0.5 - py / math.max(pr.sg.CanvasSize.Y, 1)) * 2, -1, 1)
+            end
+            if hit ~= hovBtn then
+                if hovBtn then fire(hovBtn.MouseLeave) end
+                hovBtn = hit
+                if hovBtn then fire(hovBtn.MouseEnter) snd("rbxasset://sounds/switch.wav", 0.12) end
+                if rsc then
+                    tw(rsc, 0.25, { Scale = hovBtn and 1.45 or 1 }, Enum.EasingStyle.Back)
+                    tw(rst, 0.2, { Color = hovBtn and PINK or WHITE }, Enum.EasingStyle.Quad)
+                end
+            end
+        end)
+        UIS.InputBegan:Connect(function(io)
+            if not custom then return end
+            if io.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+            local b = hovBtn
+            if not b or not b.Parent then return end
+            if b:IsA("TextBox") then pcall(function() b:CaptureFocus() end) return end
+            downBtn = b
+            fire(b.MouseButton1Down)
+            local x = b
+            while x and x ~= W.top.sg do
+                if x:IsA("GuiObject") then fire(x.InputBegan, io) end
+                x = x.Parent
+            end
+            downIo = io
+        end)
+        UIS.InputEnded:Connect(function(io)
+            if io.UserInputType ~= Enum.UserInputType.MouseButton1 or not downBtn then return end
+            local b = downBtn
+            downBtn = nil
+            if not b.Parent then return end
+            if downIo and W.top then
+                local x = b
+                while x and x ~= W.top.sg do
+                    if x:IsA("GuiObject") then fire(x.InputEnded, downIo) end
+                    x = x.Parent
+                end
+            end
+            downIo = nil
+            fire(b.MouseButton1Up)
+            if b == hovBtn then
+                fire(b.MouseButton1Click)
+                fire(b.Activated)
+                snd("rbxasset://sounds/button.wav", 0.3)
+                if rsc then
+                    tw(rsc, 0.07, { Scale = 1.1 }, Enum.EasingStyle.Quad)
+                    task.delay(0.1, function() if rsc then tw(rsc, 0.25, { Scale = hovBtn and 1.45 or 1 }, Enum.EasingStyle.Back) end end)
+                end
+            end
+        end)
+        UIS.InputChanged:Connect(function(io)
+            if io.UserInputType ~= Enum.UserInputType.MouseWheel or not W.px or not W.top then return end
+            local s = scrollAt(W.top, W.px, W.py)
+            if not s then return end
+            local mx = math.max(0, s.AbsoluteCanvasSize.Y - s.AbsoluteWindowSize.Y)
+            s.CanvasPosition = Vector2.new(s.CanvasPosition.X, math.clamp(s.CanvasPosition.Y - io.Position.Z * 70, 0, mx))
+        end)
+        -- moves an already-built ScreenGui (the controls text) into a following panel; the old empty gui stays so code that toggles it still works
+        function S.adopt(old, order)
+            if IS_MOBILE or _G.NoVR_UI2D or S.pop.flat or not old or not old.Parent then return end
+            local sg = S.mkFollow(old.Name .. "_3D", order, old.Parent, true)
+            if not sg:IsA("SurfaceGui") then sg:Destroy() return end
+            for _, c in ipairs(old:GetChildren()) do c.Parent = sg end
+            sg.Enabled = old.Enabled
+            old:GetPropertyChangedSignal("Enabled"):Connect(function() sg.Enabled = old.Enabled end)
+        end
+        pcall(function() S.adopt(lp:WaitForChild("PlayerGui"):FindFirstChild("NoVR_HUD"), 90) end)
+        end   -- world panels
+
         local startGui, blur, hb, cur
 
         local function showControls()
@@ -7050,25 +7607,31 @@ task.spawn(function()
             local old = pg:FindFirstChild("NoVR_UpdateToast")
             if old then old:Destroy() end
 
-            local tg = Instance.new("ScreenGui")
-            tg.Name = "NoVR_UpdateToast"
-            tg.ResetOnSpawn = false
-            tg.IgnoreGuiInset = true
-            pcall(function() tg.ScreenInsets = Enum.ScreenInsets.None end)
-            tg.DisplayOrder = 250   -- above the welcome / loading screens
-            tg.Parent = pg
+            local tg = S.mkFollow("NoVR_UpdateToast", 250, pg)
 
             local card = Instance.new("Frame")
             card.AnchorPoint = Vector2.new(0.5, 0)
             card.Position = UDim2.new(0.5, 0, 0, -90)
             card.Size = UDim2.fromOffset(360, 66)
-            card.BackgroundColor3 = C(40, 20, 96)
-            card.BackgroundTransparency = 0.08
+            card.BackgroundColor3 = Color3.new(1, 1, 1)
+            card.BackgroundTransparency = 0.06
             card.BorderSizePixel = 0
+            card.Rotation = 4
             card.Parent = tg
-            corner(card, 12)
-            stroke(card, C(215, 185, 255), 1.5, 0.3)
-            lbl(card, "UPDATE FOUND", 14, 8, 200, 18, 12, GREEN)
+            corner(card, 14)
+            grad(card, C(96, 56, 196), C(30, 16, 78), 90)
+            stroke(card, C(215, 185, 255), 1.5, 0.4)
+            do
+                local ta = Instance.new("Frame")   -- bright line along the top edge
+                ta.Position = UDim2.fromOffset(14, 0)
+                ta.Size = UDim2.new(1, -28, 0, 3)
+                ta.BackgroundColor3 = Color3.new(1, 1, 1)
+                ta.BorderSizePixel = 0
+                ta.Parent = card
+                corner(ta, 2)
+                grad(ta, PINK, C(255, 160, 230), 0)
+            end
+            lbl(card, "U P D A T E   F O U N D", 14, 8, 240, 18, 12, GREEN)
             local msg = lbl(card, "", 14, 28, 250, 30, 11, WHITE, Enum.Font.GothamMedium)
             msg.TextWrapped = true
             msg.TextTruncate = Enum.TextTruncate.None
@@ -7089,11 +7652,12 @@ task.spawn(function()
             cancel.Parent = card
             corner(cancel, 8)
             Theme.recolor(tg)
-            tw(card, 0.6, { Position = UDim2.new(0.5, 0, 0, 12) }, Enum.EasingStyle.Back)
+            tw(card, 0.7, { Position = UDim2.new(0.5, 0, 0, 12), Rotation = -0.8 }, Enum.EasingStyle.Back)
 
             local cancelled = false
             cancel.Activated:Connect(function() cancelled = true end)
             for i = 5, 1, -1 do
+                if S.pop.noAuto then cancelled = true end
                 if cancelled then break end
                 msg.Text = "v" .. SCRIPT_VERSION .. "  ->  " .. (newVer and ("v" .. newVer) or "new version")
                     .. "\nRestarting in " .. i .. "s"
@@ -7154,6 +7718,7 @@ task.spawn(function()
             while _G.NoVR_Gen == myGen do
                 -- pcall: an error in one check must never end the watcher
                 local okc, errc = pcall(function()
+                    if S.pop.noAuto then AU.text, AU.level = "Off - turned off in Settings", nil return end
                     if updating then return end
                     local tag = sourceStamp(UPDATE_URL)
                     if tag and baseline ~= nil and tag == lastStamp then
@@ -7326,14 +7891,14 @@ task.spawn(function()
         --   * the welcome screen (before the loading screen)   * Start Menu > Quick Settings
         -- Switching one ON runs it right away (once per session); switching OFF stops it from loading
         -- next time - a script that is already running can't be unloaded until you rejoin.
-        local OPT_DOWN = { m7 = true, avcb = true }   -- shown as UNAVAILABLE (red) and not run; the StandAlone loader is separate
+        local OPT_DOWN = {}   -- a loader lands here when it fails to download / load / run: its row then shows a red UNAVAILABLE
+        function hudApi.optDown(key) return OPT_DOWN[key] == true end
         local OPT_URL  = {
             m7   = "https://mois7.xyz/loader",
-            avcb = "https://luaprot.net/api/v3/loaders/get/00320986376827821485",
             avcb2 = "https://luaprot.net/api/v3/loaders/get/11695333999310480120",
         }
-        local OPT_NAME = { m7 = "Mois7 Admin", avcb = "Better AntiVCB", avcb2 = "Better Anti VCB (StandAlone)" }
-        local OPT_FILE = { m7 = "NoVR_M7.txt", avcb = "NoVR_BetterAntiVCB.txt", avcb2 = "NoVR_BetterAntiVCB2.txt" }
+        local OPT_NAME = { m7 = "Mois7 Admin", avcb2 = "Better Anti VCB (StandAlone)" }
+        local OPT_FILE = { m7 = "NoVR_M7.txt", avcb2 = "NoVR_BetterAntiVCB2.txt" }
         local Opt = {}
         local function readOpt(key)
             local ok, v = pcall(function() return isfile and isfile(OPT_FILE[key]) and readfile(OPT_FILE[key]) end)
@@ -7342,7 +7907,7 @@ task.spawn(function()
         local function saveOpt(key, on)
             pcall(function() if writefile then writefile(OPT_FILE[key], on and "yes" or "no") end end)
         end
-        Opt.m7, Opt.avcb, Opt.avcb2 = readOpt("m7"), readOpt("avcb"), readOpt("avcb2")   -- AntiVCB defaults to OFF
+        Opt.m7, Opt.avcb2 = readOpt("m7"), readOpt("avcb2")   -- AntiVCB defaults to OFF
         do   -- Mois7 Admin is built in: ON unless you switched it off before
             local okH, has = pcall(function() return isfile and isfile(OPT_FILE.m7) end)
             if not (okH and has) then Opt.m7 = true end
@@ -7386,24 +7951,33 @@ task.spawn(function()
 
         -- same as:  loadstring(game:HttpGet(<url>))()
         local function runOpt(key)
-            if OPT_DOWN[key] then return end
             _G.NoVR_OptRan = _G.NoVR_OptRan or {}
-            if _G.NoVR_OptRan[key] then return end
-            _G.NoVR_OptRan[key] = true
+            local ranKey = OPT_URL[key]   -- keyed by link: two switches that share one loader only run it once
+            if _G.NoVR_OptRan[ranKey] then return end
+            _G.NoVR_OptRan[ranKey] = true
+            local function failed(why)
+                warn("[NoVR] " .. OPT_NAME[key] .. ": " .. why)
+                _G.NoVR_OptRan[ranKey] = nil
+                OPT_DOWN[key] = true
+                Opt[key] = false
+                pcall(function() game:GetService("StarterGui"):SetCore("SendNotification", { Title = OPT_NAME[key], Text = "Unavailable - it could not load. Tap it to try again.", Duration = 4 }) end)
+            end
             task.spawn(function()
                 local url = OPT_URL[key]
                 local okG, src = pcall(function() return hget(url) end)
                 if not (okG and type(src) == "string" and #src > 0) then src = rawGet(url) end
-                if not src then
-                    warn("[NoVR] " .. OPT_NAME[key] .. ": could not download the loader")
-                    _G.NoVR_OptRan[key] = nil
-                    return
-                end
+                if not src then failed("could not download the loader") return end
                 local fn, err = (EXEC.loadstring or loadstring or load)(src)
-                if not fn then warn("[NoVR] " .. OPT_NAME[key] .. ": loader has an error: " .. tostring(err)) return end
+                if not fn then failed("loader has an error: " .. tostring(err)) return end
                 local before = key == "m7" and snapGuis() or nil
                 local ok, e = pcall(fn)
-                if ok then print("[NoVR] " .. OPT_NAME[key] .. " loaded") else warn("[NoVR] " .. OPT_NAME[key] .. " failed: " .. tostring(e)) end
+                if ok then
+                    OPT_DOWN[key] = nil
+                    print("[NoVR] " .. OPT_NAME[key] .. " loaded")
+                else
+                    failed("failed: " .. tostring(e))
+                    return
+                end
                 if ok and before then
                     task.wait(3)   -- give it time to build its window, then take the new window(s) under our control
                     for _, rt in ipairs(guiRoots()) do
@@ -7424,8 +7998,11 @@ task.spawn(function()
         end
         -- switch from the Start Menu: remember the choice, and run it now when it was turned ON
         local function flipOpt(key)
-            if OPT_DOWN[key] then
-                pcall(function() game:GetService("StarterGui"):SetCore("SendNotification", { Title = OPT_NAME[key], Text = "Unavailable right now.", Duration = 3 }) end)
+            if OPT_DOWN[key] then   -- it failed last time: a tap tries it again
+                OPT_DOWN[key] = nil
+                Opt[key] = true
+                saveOpt(key, true)
+                runOpt(key)
                 return
             end
             Opt[key] = not Opt[key]
@@ -7443,18 +8020,11 @@ task.spawn(function()
             if old then old:Destroy() end
             blur = Instance.new("BlurEffect")
             blur.Name = "NoVR_Blur"
-            blur.Size = 0
+            blur.Size = IS_MOBILE and 6 or 14   -- a quick soft focus that sharpens as the windows settle
             blur.Parent = Lighting
-            tw(blur, 0.8, { Size = 0 }, Enum.EasingStyle.Sine)   -- no blur: the game stays sharp
+            tw(blur, 0.9, { Size = 0 }, Enum.EasingStyle.Quint)
 
-            local g = Instance.new("ScreenGui")
-            g.Name = "NoVR_Start"
-            g.ResetOnSpawn = false
-            g.IgnoreGuiInset = true
-            pcall(function() g.ScreenInsets = Enum.ScreenInsets.None end)
-            g.DisplayOrder = 100
-            g.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-            g.Parent = lp:WaitForChild("PlayerGui")
+            local g = S.mkRoot("NoVR_Start", 100, lp:WaitForChild("PlayerGui"), blur, { nobg = true, zoom = true })
             startGui = g
             cur = { panels = {}, shadows = {}, glows = {} }
             local me = cur
@@ -7712,7 +8282,8 @@ task.spawn(function()
                     NumberSequenceKeypoint.new(0.88, 0.15), NumberSequenceKeypoint.new(1, 1) })
                 acg.Parent = accent
                 local ps = Instance.new("UIScale")
-                ps.Scale = 0.93
+                ps.Scale = 0.86
+                p.Rotation = (math.random() < 0.5 and -1 or 1) * 2.2   -- lands slightly crooked, then straightens
                 ps.Parent = p
                 local ent = { p = p, s = ps, x = x, y = y }
                 me.panels[#me.panels + 1] = ent
@@ -7782,8 +8353,10 @@ task.spawn(function()
                 layout()
                 task.delay(delay, function()
                     if startGui ~= g then return end
-                    tw(p, 1.0, { GroupTransparency = 0, Position = UDim2.fromOffset(ent.x, ent.y) }, Enum.EasingStyle.Exponential)
-                    tw(ps, 0.9, { Scale = ent.userScale or 1 }, Enum.EasingStyle.Quint)
+                    tw(p, 0.5, { GroupTransparency = 0 }, Enum.EasingStyle.Quad)
+                    tw(p, 0.85, { Position = UDim2.fromOffset(ent.x, ent.y) }, Enum.EasingStyle.Quint)
+                    tw(p, 0.9, { Rotation = 0 }, Enum.EasingStyle.Back)
+                    tw(ps, 0.8, { Scale = ent.userScale or 1 }, Enum.EasingStyle.Back)   -- overshoots a little and springs back like a real panel
                 end)
 
                 -- ===== drag handle (top strip of every panel) =====
@@ -7994,7 +8567,7 @@ task.spawn(function()
                     { "+ / -", "Avatar bigger / smaller" },
                     { "MENUS" },
                     { "Right Ctrl", "Show / hide the PC menu" },
-                    { "Home", "Open / close this Start menu" },
+                    { "Home / Ctrl + K", "Open / close this Start menu" },
                     { "Esc", "Close the Start menu" },
                 },
                 Mobile = {
@@ -8044,7 +8617,7 @@ task.spawn(function()
                     { "Mouse wheel", "Hand reach in / out" },
                     { "Numpad + / -", "Hand reach in / out (hold)" },
                     { "MENU" },
-                    { "Home", "Open / close this menu" },
+                    { "Home / Ctrl + K", "Open / close this menu" },
                     { "Camera button", "Dock: switch smooth / own / the game's VR camera" },
                 }
                 CONTROLS.Mobile = CONTROLS.PC
@@ -8637,16 +9210,36 @@ task.spawn(function()
                 swRow(1162, "Announcements", "Owner pop-ups for script users", function() return S.chat.ann end,
                     function(v) S.chat.ann = v end)
 
-                lbl(p, "Bar size", 20, 1214, 200, 18, 12, MUTED)
-                local bsV = lbl(p, math.floor((S.bar.scale or 1) * 100 + 0.5) .. "%", 230, 1214, 100, 18, 12, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Right)
-                hslider(p, 20, 1250, 310, ((S.bar.scale or 1) - 0.6) / 0.7, false, function(f)
+                swRow(1210, "Immersive mode", "3D menus + panels that follow your head", function() return not S.pop.flat end,
+                    function(v)
+                        S.pop.flat = not v
+                        task.spawn(function()   -- the menu rebuilds itself in the new style
+                            pcall(hudApi.closeStart)
+                            task.wait(0.7)
+                            pcall(hudApi.openStart)
+                        end)
+                    end)
+                swRow(1258, "Auto update", "Check GitHub for new versions", function() return AUTO_UPDATE == true and not S.pop.noAuto end,
+                    function(v) S.pop.noAuto = not v end)
+                swRow(1306, "Menu sounds", "Soft ticks when you aim / click", function() return not S.pop.nosnd end,
+                    function(v) S.pop.nosnd = not v end)
+
+                lbl(p, "3D menu size", 20, 1358, 200, 18, 12, MUTED)
+                local zmV = lbl(p, math.floor((S.pop.zoom or 1.5) * 100 + 0.5) .. "%", 230, 1358, 100, 18, 12, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Right)
+                hslider(p, 20, 1394, 310, ((S.pop.zoom or 1.5) - 0.6) / 1.9, false, function(f)
+                    S.pop.zoom = math.floor((0.6 + f * 1.9) * 100 + 0.5) / 100
+                    zmV.Text = math.floor(S.pop.zoom * 100 + 0.5) .. "%"
+                end)
+                lbl(p, "Bar size", 20, 1418, 200, 18, 12, MUTED)
+                local bsV = lbl(p, math.floor((S.bar.scale or 1) * 100 + 0.5) .. "%", 230, 1418, 100, 18, 12, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Right)
+                hslider(p, 20, 1454, 310, ((S.bar.scale or 1) - 0.6) / 0.7, false, function(f)
                     S.bar.scale = math.floor((0.6 + f * 0.7) * 100 + 0.5) / 100
                     bsV.Text = math.floor(S.bar.scale * 100 + 0.5) .. "%"
                     if hudApi.barApply then hudApi.barApply() end
                 end)
-                lbl(p, "Pop-up time", 20, 1274, 200, 18, 12, MUTED)
-                local ptV = lbl(p, (S.pop.secs or 10) .. " s", 230, 1274, 100, 18, 12, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Right)
-                hslider(p, 20, 1310, 310, ((S.pop.secs or 10) - 4) / 16, false, function(f)
+                lbl(p, "Pop-up time", 20, 1478, 200, 18, 12, MUTED)
+                local ptV = lbl(p, (S.pop.secs or 10) .. " s", 230, 1478, 100, 18, 12, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Right)
+                hslider(p, 20, 1514, 310, ((S.pop.secs or 10) - 4) / 16, false, function(f)
                     S.pop.secs = math.floor(4 + f * 16 + 0.5)
                     ptV.Text = S.pop.secs .. " s"
                 end)
@@ -8668,7 +9261,7 @@ task.spawn(function()
                     b.InputBegan:Connect(function(io) if isPress(io) then ripple(b, io, fit.Scale) end end)
                     b.Activated:Connect(fn)
                 end
-                btn2(20, 1346, "RESET POSITIONS", function()
+                btn2(20, 1550, "RESET POSITIONS", function()
                     for _, e in ipairs(me.panels) do
                         if e.moveTo and e.homeX and not e.noShadow then
                             e.moveTo(e.homeX, e.homeY)
@@ -8679,8 +9272,8 @@ task.spawn(function()
                     S.bar.x, S.bar.y, S.bar.mx, S.bar.my = 0.5, 0.93, nil, nil
                     if hudApi.barApply then hudApi.barApply() end
                 end)
-                btn2(180, 1346, "SHOW POP-UPS", function() if hudApi.showPopups then task.spawn(hudApi.showPopups, true) end end)
-                local note2 = lbl(p, "Menus can't leave the Roblox window. Dragging is smoothed and clamped at the edges.", 20, 1392, 310, 28, 10, MUTED, Enum.Font.GothamMedium)
+                btn2(180, 1550, "SHOW POP-UPS", function() if hudApi.showPopups then task.spawn(hudApi.showPopups, true) end end)
+                local note2 = lbl(p, "Menus can't leave the Roblox window. Dragging is smoothed and clamped at the edges.", 20, 1596, 310, 28, 10, MUTED, Enum.Font.GothamMedium)
                 note2.TextWrapped = true
                 note2.TextTruncate = Enum.TextTruncate.None
                 ent.scrollify(50)
@@ -16153,15 +16746,19 @@ task.spawn(function()
                 end })
                 add({ name = "Far View", sec = "Quick", sub = "No fog, full detail (End)", get = onoff(function() return U.far end),
                       fn = function() U.setFar(not U.far) end })
-                add({ name = "Mois7 Admin", sec = "Quick", sub = "Unavailable right now", red = true, wide = true, get = function() return "UNAVAILABLE", false end, fn = function() end })
+                add({ name = "Mois7 Admin", sec = "Quick", sub = "Built-in admin commands (loads at start)", wide = true,
+                      get = function() if hudApi.optDown("m7") then return "UNAVAILABLE", false end return onoff(function() return Opt.m7 end)() end, fn = optFlip("m7") })
                 add({ name = "Admin Window", sec = "Quick", sub = "Show / hide the Mois7 commands window",
                       get = function() local f, v = hudApi.m7State() return f and (v and "SHOWN" or "HIDDEN") or "N/A", f and v or false end,
                       fn = function() hudApi.m7Toggle() end })
                 add({ name = "Auto Execute", sec = "Quick", sub = "Run this script again after a rejoin / hop", get = onoff(function() return S.pop.auto end),
                       fn = function() hudApi.setAuto(not S.pop.auto) end })
-                add({ name = "Better AntiVCB", sec = "Quick", sub = "Unavailable right now", red = true, wide = true, get = function() return "UNAVAILABLE", false end, fn = function() end })
-                add({ name = "Better Anti VCB (StandAlone)", sec = "Quick", sub = "Separate anti-VC-ban loader, runs once when switched on", get = onoff(function() return Opt.avcb2 end), fn = optFlip("avcb2") })
+                add({ name = "Better Anti VCB (StandAlone)", sec = "Quick", sub = "Runs on its own - no Mois7 needed", wide = true,
+                      get = function() if hudApi.optDown("avcb2") then return "UNAVAILABLE", false end return onoff(function() return Opt.avcb2 end)() end, fn = optFlip("avcb2") })
                 -- MENUS: every page
+                add({ name = "Smooth Look", sec = "Quick", sub = "Glide the mouse turning (no jerks)", get = onoff(function() return S.smoothLook == true end),
+                      fn = function() S.smoothLook = not S.smoothLook end })
+                add({ name = "Pause Menu", sec = "Quick", sub = "Blurred pause screen (` or Pause key)", badge = "OPEN", fn = function() if hudApi.openPause then hudApi.openPause() end end })
                 add({ name = "Fix Controls", sec = "Quick", sub = "Hands gone or keys dead? Tap this", badge = "RUN", fn = function()
                     local msg = "Nothing was stuck."
                     pcall(function()
@@ -16659,7 +17256,7 @@ task.spawn(function()
                         return
                     end
                     -- the menu never blocks movement, hands, clicks or keys
-                    local using = false
+                    local using = S.world ~= nil and S.world.count > 0
                     S.menuOpen = using
                 end)
             end
@@ -16810,7 +17407,7 @@ task.spawn(function()
             end
             -- the two extra loaders (same switches as on the welcome screen)
             toggle("Mois7 Admin", "plus", PINK, 2, 0, function() flipOpt("m7") end, function() return Opt.m7 end)
-            toggle("Better AntiVCB", "lock", PINK, 2, 1, function() flipOpt("avcb") end, function() return Opt.avcb end)
+            toggle("Better Anti VCB", "lock", PINK, 2, 1, function() flipOpt("avcb2") end, function() return Opt.avcb2 end)
 
             -- vertical size slider
             local track = Instance.new("Frame")
@@ -17117,6 +17714,584 @@ task.spawn(function()
         end
         hudApi.brand = brandAsset
 
+        -- the slab buttons are drawn from two small images (a shaded slab and a soft shadow) written once to the executor folder;
+        -- without writefile / getcustomasset the strip version is used instead
+        local SLAB_B64 = { face = "iVBORw0KGgoAAAANSUhEUgAAAXYAAAECCAQAAABA5DQ5AAATZUlEQVR42u2dXYxd1X3F197n3Hvno2YKNKPUThWq0oG4EypRKfOQ9gFRZLnvtVwpeaiFlKjqJEG1cVLbHSbjqRQrEZYtIZFWbqU82DWqhCqCYxJqkmBht0BVGFLbCkoi1U7imBR/gWfOx78P93vm3pl7z93n3LP3WesFCcPFnLP8928vr7v/AEVRFEVRFEVReZbiI6BaJRqAQqyEz4Jy2ehKvDbTU5TLRpetcloWxQfE51OhXLR61eiTckSWRUTknDwMiBZiLuUWpYsGpCyz8ksREQklEJEbMgtwvlMuwYsPALJd3q4ZPa79VUTkO7KZ851yw+pVo0/L8TajVxVLICKXZWcTcyjKUkoXBcikLMiyiEQSyVpV5/s/yET9n6co+yi9eiDdJZdbTN1JsYQiclG2cb5T9lL6o/I9EREJ2uBFus73p8Wn3Smr4AUA5AE51oHSu6sKOedkpp7dUFTe4UUDMiFPyfsiEq0DL93meyBfah5sKSqv8FKd6Tvl4gaUvhHOfEemeFyl8k7pM/JSj5Te/bgaiMg1xpFUnil9ixyTla4RY//z/bjcC4jP+U7li9LLsr9RBDChahx5iXEklTdKrxcBksNLJwWMI6l8Ufq0vNhXxNiPGEdSuaH0el13cEpnHEnlmNJLskv+1yClM46kcgovj8m51OCFcSSVA6uvV9eVTOY740gqC0qvFQEWUqd0xpHUUCm9Xte9mAmlbxRHHpFNPK5S6VF673XddFX9PeUNxpGUcXgBAJlq1HUjyYMCEQlkjjhDmYOXehEgSV037fnOOJIyBi/1uu7bLaycJ1XjyPflcc53anCjD17XzSqO3Mw4kkpO6ZNyxFBdN+35HonIZcaRVFJKnzVa12UcSeUUXlbf22WDYsaRVO9GT7+uyziSyhGlD68IwDiSyozSs6vrMo6khgov9bpuYCG8MI6keoaXB4ZS180yjuRxlfACyITM1YoAkbimehw5kfV8528luYIXaBUBsgt7MQUggptsKxBoXMIudVYUlIr57otJ6TM5qetmMd9X5CkpZffHTZzsOaF0FQGyBQv4LHyE0HCfZ2MoKJzFLnVJNCT9zas0ew4oHVCxlPEkZjHpMLx0wpkIPq7jgDoKiK9Cmr0IlL4T+zANIIRXsHcSQwM4iSfUFfERpTnfafbhG30ah7C9kEZvne9X8IQ6CYhO77jKpHN4lC4qkkk5gjewHTFi+AUdPQo+QmzGv8gRmVBxenEkJ/swKf1z2F8wSl9vvqceR9Ls2cOLp0JAtuMQpgFE0HwLNYXwEeDvsaiCNI6rfMzZWt1XISDT2IedNHrH42qKcSQfdYaUjliJTGIWT6KMmCemdY6rqcSRNHtWlK5qRYAFbCalbzjfU4kjafbsKP1RfAWPorgRY//zvR5Heiqi2a2AFxUB8gD24i9J6X0fV4GjOKCum5nvfPDpwgtULBN4Al/CBGII4aXP+V6NI7+gTpv44yaaPT14qRcB5p2u62Yz3+dxUIWDHldp9jQpfQYLeIyUPvBxFdA4j79Sbw4WRzL8SoPSRYWyRY7hh3is0EUAM9LQCDGDV2RWxUqSt9/5EtKg9CLWddNW9Umexi51Jel8p9nNU3q9CEB4MX1crcaRf6NOJIsj+TLMUnq9rsuIMc35/o/YnSSO5AsxQ+kRIJPYj8+xCJD6fI/hJYsjaXYzlF7CZ/FVbCGlZzjf+44jaXYT8PIYFjBDeMlQieJI/nab3Oq+EhXKtBzHS5hBBOGBNDMliiP5chJSOkTFMoHdrOsOHWd6jiNp9iSUrgpxb5cdx9U+4kiaPRmls66bt/lejSM9xN3nO19UX/CiIkCm8OVaXVcRXnIy31vjyK7znWbvHV7qRYDdrOvmdr4fxh4VdrM7zd4bvKy+t4ub3/Knehz5RXW+Oppo9qRGZ13XlvkeYo863OnL2nxtvVD6JPbj8ygxYrQGZ07jC+rS6uMqzb4xpfPeLtuOqxF8vBf9tX+i/Qc4p7rAi3gqVrFsxxs4gsnan49SNkjBjyPc6x2X45c+Irp5cyTN3snovhIVybS8iBcxzSKAfSdV7UGuha/ufP4PVfxcw+NMFTpReth2bxcnulUMo6DxAV5Xr+k4aj+i0uztlK5VyLquvUYXaMRYwg/wHkYx7t1RNHtHeIGnQsTyKBYxg2rESKvbBS9Q+BlewU9RwThirA7aafZWeGm9t4tPxjKja/war+G/IRiHoNMXmPhKqxFj1HJvFyndMngBNJbxH/hP3MQYgG7f1Cu42QuzZtdpSgfewmv4BUYwjvW+kuoX2uieChHJDBYbdV1a3TpKv4JX8GP4HSmdZm+l9NY1u0Q6q2a6gsYtfB9LCDDWhdJp9jqlt97bRaNbRukKMV7D67iOEYygt/s0CveSO67ZJbxYZnTgRziLn6OMsQ3hpaBmrxk9aluzy5luGaUD1/DvuATdI7wU0uziqQhR271dNLp1lP4BzuJNBKgA6Hc3QUFed43SS/g867o2U/p/4VXcQKVnSi+c2Tve20WrW2T0apb+Ls7g5yhhtA9KL5jZxVchwrY1uzS6ZZSucA1n8TY0Rvuk9AKZXTzEinVd6yn9dZzDMkYSUHpBzM41uy7AS7OuOzqg0Z01e8d7u2h16+BlvbouzV6DF9Z1bTf6xnVdmn1tXZdfk7YMXnqt6xbc7Fyz6wKl91rXLbDZG0WA1nu7aHXrKL33um5PHwnt3ndQa0WALVjAZ2r3dpHSrZrp/dd1N/hEUVHJ97EStP5d629D4b1d9lN6a11XDz7RBZH2KwjeiQ/e9a9XovnYCbNzza4LRm/WdX0DlC6R8kYRXI2P3jo0v9L+Y8pio3PNrvWU3qzrliGQwT8yHvGDEN+6c2D/ZeCktyNywOxcs2s/paOtrjuw0UWikl9C8HK8b895YM6fj1Z/qIVm55pdNyi9XtfVRuBFe2P48FL8tb3HgJPen3fcrGRZasG6ru1GN1XXbfnMWGHcW76+fDh6+svX5zSww4WdStVdCm11XVK6hZRereuaoHQRxBUvhvxT9LW9F9dSuqVm55pdNyi9WdcdnNIReX4Fy+ejfXtf7kzpFpqd93a5AC/Nuq42FDGOYfky/u7St74ZzPmI5zf8UGWB0blm1wF4qdd1TWTpiIERHazg0M2j81c3ghdrzF6LGDfjINfs2mv0el23YojSy55GeEIW9yz1Ai9WmL1lze4sJmtbjCmL4AVQbXVdA1l67HllBEvy5J5TwJz/VKT6+NCcmp1rdl2g9GZd1zNYBJCDN5+dX5nTwHyfH6pybHSu2bUaXup13bIRSheM6GglfhYH9/RB6Tk3O9fs2j7TFdCo644YoXQVlXyN8JQ8uWcJOOntiJN9aK7MzrquC5SeSl13KV7cc6J7EaA35YaE19R1WQSw0OjJbtddl9L94Ory0VuHqpSeBF5yNtlZ13WD0rOs61pq9galz7IIYC+lZ13XtdDsXLPrBqVnX9e1jNm5Ztd2ow+zrmvVZK/BS+u9XaR0Cyl9WHVda8xeixhb1+yS0i2k9GHWda0wO+u6LsDL8Ou6uTd7I2JsXbNLeLEOXvJQ18252WuU3rpml/BindHzUtfNsdlX1XUJL9bBS97qujk1e8c1u4QXyyg9b3XdHJq9YfTWNbs0unXwkr+6bu7Mznu7bJ/p+a3r5srsjXu7uGbXYkrPb103iVKpC/DeLheMnu+6bk4mO+/tcoHS817XzYHZxUOshHVduyndhrrukM3ONbtuULoddd0hMjvX7NpudNvqukOb7KzrukHpNtV1h2L2NXVdrtm1ktJtq+tmbnau2XUBXuys62Zqdt7b5Qa82FrXzdDsLXXdz/DeLluNbnNdNyOz894u2+HFhbpuBmbnml0XKN2Fum7KZue9XW7Aixt13VTNzrqu7TPdrbpuambnml0XKN2tum4SbVgXYF3XBaO7V9dNYbKzrusCpbtY1zVsdq7ZdYHSXa3rGjQ77+1yg9LdresaYvYapUes69pq9CLUdY1Mdq7ZdYPSXa/rDmx2rtl1g9KLUNc1M9m5ZtdieClOXXcgs4uCwqfwVdZ17YWXItV1BzC7KOCfJ/7kJ7/3m4hipUnp1hm9aHXdJGqgipIX1Dvyq2irvksJx7o18ALotrru4EUAiT2v7AVLUbOuG7rxtBqTXckLd5d+HN2j5UH18cZhh8o7pRe1rjvQZAeAWJUQ4C1cxUOo0O65hxfVqOuOG8jSEQtGvGhl2Yq67sCT3XvXuzsUrQKMYit+m/M9tzOddd2BJ3v9UZawgtdxHz4Bn3bPIaW31nVHjNR1Pb/iB0tBs64bufjs/M7/9xpl/BS/xh/gtzjfc2Z01nWNmr36WMu4jfOYwv1QtHtOKL1Z1x2DGKB0xKN+EK5YWNc1aPaq4T0ILuAqPom7aPehU7puq+saiBijkl/SwcvSqOu6bfUNvqlUne//h3N4AIwjh03p9bruiKG67rj/4aUPm3Xd0P0nufHX8lBCxDhyaEZnXTdDs1fneRm/xKuMI4dA6apR1x01QOn1uu6y9XXdlMxen++MI4dB6c26romI0fcrXmtdt0hW72MZAePIrOGlWdcdNVXX9ZcvLzfrumHRnqvfzytgHJkdvNTrumaKAMCoF6wsN+u6YRGfbJ9f0GAcmb7RdaOuO26I0sueRtBS1y0WvCQ2O+PINOGFdd101aEIplQv/1qMEB9lHGmU0lnXzdlkb2YFjCPNUjrrujk1e9XwJSzjTfwuphhHDvAUFXSjrjtmhNLX1nVp9QHNjtpivHfxKzyEuznfE1E667qWmL1+XL2Fc7ifcWQCo7OuOzyzRyJJXpsPwf/gGh7COO3eM6WzrjvENObkPZuu+l4QKS/ZB4UoMY7skdJ5u+4QzQ6I+qb/8a/4B7T/Yaj9ZB8VI8THsJVx5IaUztt1h2p2AArywszoM6MPvx9DKZXs41Ywxjiyi9Hb67om7u2SWGFML19Xh4NaXbfoWXqvZscZ/5Hw+U2/sahnIwShSjjfIwjjyK6Uztt1c2L2+gM7ta10rLL5ZsL5rgCs4C7GkWsonbfr5srsgKhXvEfC5zePf6O88w6iAY6rmnEkeLturs3enO8vPV76up64HcJLNt8FK/hIweNI3q6be7MDop7TO6JvT1WOjG67AYmVTvbhRY4jebuuJWZvme9zar/HOLJveAFUW13XQJYee14ZwZI067o0uimz19fOnJ7xGUf2Tems61pmdoBxZDJ4qdd1y0YoXTCio5WYdd20zc44sp+Zztt1LTc748jeKb1Z19VG6rraryBYipt1XRo9bbO3HFcZR3Y1erOu6xuk9LhR1yWlZ2Z2xpHrU3q9rmuiCIAY8YgfhGBdd1hmb5nvjCPbKJ11XSfNzjhyLaWzruus2QHGkazrFsjsq+LIxMdVW+NI1nULZfaWOPLpsR23EA1wXLUrjmRdt4Bmb873787qBW/igwLEkazrFtjsgCgoFX97qnxs/NPXRcTlOJJ13YKbvX5cfbZ03z7vb3XJ1TiSdV2avf7iNETJ6U/7xypTN2JR2qk4knVdmn3V55zxHglPTtyz4M1GWHEmjmRdl2bvMt9VDJzaUX667Egcybouzb7OcdWdOJJ1XZq9p+Oq7XEk67o0e8/z3eY4knVdmj3BfLcxjmRdl2ZPdFw1FUeO46FMNq+yrkuzD/DZ5uLI+/AgvBTtzrouzW5gvpuJI5dxDz6JiQZRmzU667o0u6Hjqrk48vdxv3GcYV2XZjd+XDURRwb4KLYajCNZ16XZU5nvZuLIACVsxe8YmO+s69LsKc93E3FkhI/hEwPGkazr0uxpz/dcxJGs69LsGf33hhtHsq5Ls2eqYcWRrOvS7EPQMOJI1nWpoRXGs4wjWdelhmr2rOJI1nWpHJi9Pt/TiyNZ16VyZPY040jWdamcmR2pxJFgXZfKpdlhPo4E67pUXs1uNo58EMD38AvWdal8mr1+XDXzZe0LWDEUMbKuS7OnNt8HjyMVIlxAaOAnw7ouzZ7BfB8kjlQIcQHhoBVg1nVp9myOq4PEkQbMzrquk9K5/BUYK5zxt51971N3jo7qipIMrSYiUUlXdHBC/mj3gfmrcz4Urc7Jnvp8r8eRpc23+jiuDjDZWdel2Yd3XK3FkcdGt93uebN2UrOzrkuz5+C4Cnx3Vi36m273dFxNZHbWdWn2fMx3KBWferj8TGXmZizYKI7s1+ys6/KAmp9fj6LiM/72N3/wx7fnK7qijR5XBaGnRn1ZCv5i95/tWTrpidrBNJ2TfdjHVR0LTm0rHalM3YpEdz+u9j7ZWdel2XP7c622I+/9evnxOwi6Hld7NDvrujR7vlW15Omd/je6x5E9mJ11XZrdCpxRUCpeL47cyOys69LsFmn9OHI9s7OuS7Nbp/XiyG5mZ1236NKW/hrtN44UhL4a96Lz4Z/u3rX3IhsvnOy2zfeOceTayc66LmW92dExjlxldtZ1KUfMjrVxpFZ1s/N2Xcoxs6+OI+Mo8i4gFLCuS7lndqA1jixtuhFeUDHrupSrZq/P9397eNMzeuYtLK8I67qUyzrjA3P+C4uHTy9urfK8S7+cKap9vuvmwVVodKpFvmv/QyoW9Zx+RwDCC0VRFEVRFEVRFEVROdT/A+aK+A9kpwulAAAAAElFTkSuQmCC", shadow = "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" }
+        local slabCache = {}
+        local function slabAsset(key)
+            if slabCache[key] ~= nil then return slabCache[key] or nil end
+            slabCache[key] = false
+            pcall(function()
+                local ge = (getgenv and getgenv()) or _G
+                local gca = ge.getcustomasset or ge.getsynasset or getcustomasset or getsynasset
+                local fn = "NoVR_slab_" .. key .. "_v1.png"
+                if writefile and gca then
+                    if not (isfile and isfile(fn)) then writefile(fn, b64dec2(SLAB_B64[key])) end
+                    slabCache[key] = gca(fn)
+                end
+            end)
+            return slabCache[key] or nil
+        end
+
+        -- recolours a screen to the current theme hue (the seasons are theme hues too) and keeps doing it when it changes
+        local function themeAll(root)
+            Theme.recolor(root)
+            for _, d in ipairs(root:GetDescendants()) do
+                if (d:IsA("ImageLabel") or d:IsA("ImageButton")) and d:GetAttribute("tc") == nil then
+                    d.ImageColor3 = Theme.tint(baseOf(d, "ImageColor3"))
+                end
+            end
+        end
+        local function themeWatch(g, roots)
+            local function go()
+                if not g.Parent then return end
+                for _, r in ipairs(roots or { g }) do pcall(themeAll, r) end
+            end
+            Theme.listeners[#Theme.listeners + 1] = go
+            task.spawn(function()   -- a few passes so pieces built a moment later are covered too
+                for _, w in ipairs({ 0.05, 0.6, 1.4 }) do task.wait(w) go() end
+            end)
+        end
+
+        -- ============ PAUSE MENU (` or Pause key) ============
+        -- A liquid purple wave sweeps out from the centre while everything behind turns very blurry, then a neat stack of
+        -- glass buttons floats in. Same theme (and season colours) as the rest of the script.
+        do   -- (in its own block: the script is close to Lua's 200-locals limit)
+        local pauseGui, pauseBlur
+        local function closePause()
+            if not pauseGui then return end
+            local g, b, shell = pauseGui, pauseBlur, pauseGui:FindFirstChild("Shell")
+            pauseGui, pauseBlur = nil, nil
+            S.menuOpen = false
+            S.uiLook = false
+            setLook(true)
+            if b then
+                tw(b, 0.5, { Size = 0 }, Enum.EasingStyle.Sine)
+                task.delay(0.55, function() b:Destroy() end)
+            end
+            if shell then tw(shell, 0.35, { GroupTransparency = 1 }, Enum.EasingStyle.Sine) end
+            local st = g:FindFirstChild("Shell") and g.Shell:FindFirstChild("Stage")
+            if st and st:FindFirstChildOfClass("UIScale") then tw(st:FindFirstChildOfClass("UIScale"), 0.35, { Scale = 0.94 }, Enum.EasingStyle.Quad) end
+            task.delay(0.45, function() g:Destroy() end)
+        end
+        -- 3D version (PC): three real panels float in front of the camera; the mouse turns the view of the panels (the cursor
+        -- stays locked on the crosshair), the button under the crosshair lights up, click chooses. The game behind goes out of focus.
+        local function open3D()
+            S.menuOpen = true
+            S.uiLook = true   -- the mouse still turns your head (smoothed) while the menu is open, nothing else reacts
+            S.uiSm = Vector2.zero
+            setLook(false)
+            local c0 = cam.CFrame
+            local lv0 = c0.LookVector
+            local base0 = CFrame.new(c0.Position) * CFrame.Angles(0, math.atan2(-lv0.X, -lv0.Z), 0)   -- the panels are placed once, level, where you were facing
+            local pgui = lp:WaitForChild("PlayerGui")
+            local oldP = pgui:FindFirstChild("NoVR_Pause")
+            if oldP then oldP:Destroy() end
+            for _, n in ipairs({ "NoVR_PauseBlur", "NoVR_PauseDoF" }) do
+                local o = Lighting:FindFirstChild(n)
+                if o then o:Destroy() end
+            end
+            local g = Instance.new("ScreenGui")   -- holds only the crosshair and the hint line
+            g.Name = "NoVR_Pause"
+            g.ResetOnSpawn = false
+            g.IgnoreGuiInset = true
+            pcall(function() g.ScreenInsets = Enum.ScreenInsets.None end)
+            pcall(function() g.ScreenInsets = Enum.ScreenInsets.None end)
+            g.DisplayOrder = 150
+            g.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+            g.Parent = pgui
+            pauseGui, pauseBlur = g, nil
+
+            local dof = Instance.new("DepthOfFieldEffect")   -- everything but the panels goes out of focus
+            dof.Name = "NoVR_PauseDoF"
+            dof.FocusDistance = 13
+            dof.InFocusRadius = 2.5
+            dof.NearIntensity = 0
+            dof.FarIntensity = 0
+            dof.Parent = Lighting
+            tw(dof, 0.8, { NearIntensity = 1, FarIntensity = 1 }, Enum.EasingStyle.Sine)
+
+            local DIST = 13
+            local folder = Instance.new("Folder")
+            folder.Name = "NoVR_PausePanels"
+            folder.Parent = cam
+            local function mkPart(w, h)
+                local p = Instance.new("Part")
+                p.Anchored, p.CanCollide, p.CanQuery, p.CanTouch, p.CastShadow = true, false, false, false, false
+                p.Size = Vector3.new(w, h, 0.1)
+                p.Parent = folder
+                return p
+            end
+            -- a soft purple veil over the whole view, in front of the world but behind the panels
+            local veil = mkPart(160, 100)
+            veil.Color = Theme.tint(C(46, 20, 112))
+            veil.Material = Enum.Material.SmoothPlastic
+            veil.Transparency = 0.45
+            local function mkPanel(w, h, cw, ch, theta, yOff)
+                local part = mkPart(w, h)
+                part.Transparency = 1
+                local sg = Instance.new("SurfaceGui")
+                sg.Face = Enum.NormalId.Front
+                sg.SizingMode = Enum.SurfaceGuiSizingMode.FixedSize
+                sg.CanvasSize = Vector2.new(cw, ch)
+                sg.AlwaysOnTop = true
+                sg.LightInfluence = 0
+                sg.Brightness = 1
+                sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+                sg.Adornee = part
+                sg.Parent = part
+                local card = Instance.new("Frame")
+                card.Size = UDim2.fromScale(1, 1)
+                card.BackgroundColor3 = Color3.new(1, 1, 1)
+                card.BackgroundTransparency = 0.35
+                card.BorderSizePixel = 0
+                card.Parent = sg
+                corner(card, 26)
+                grad(card, C(70, 30, 150), C(12, 6, 40), 70)
+                stroke(card, C(215, 185, 255), 2, 0.4)
+                return { part = part, sg = sg, card = card, w = w, h = h, theta = theta, yOff = yOff, cw = cw, ch = ch }
+            end
+            local center = mkPanel(9.6, 12.8, 420, 560, 0, 0)
+            local left = mkPanel(7.3, 9.0, 340, 420, 0.8, -0.4)
+            local right = mkPanel(7.3, 9.0, 340, 420, -0.8, -0.4)
+            local panels = { center, left, right }
+
+            local function note(txt)
+                pcall(function() game:GetService("StarterGui"):SetCore("SendNotification", { Title = "Pause menu", Text = txt, Duration = 3 }) end)
+            end
+            local ROWS = {
+                { "Resume", true, function() closePause() end },
+                { "Open Menu", false, function()
+                    closePause()
+                    task.delay(0.4, function() pcall(function() hudApi.openStart() end) end)
+                end },
+                { "Reset VR Rig", false, function()
+                    closePause()
+                    task.delay(0.3, function() pcall(function() S.rigReset(false) end) end)
+                end },
+                { "Fix Controls", false, function()
+                    local msg = "Nothing was stuck."
+                    pcall(function()
+                        local tb = UIS:GetFocusedTextBox()
+                        if tb then tb:ReleaseFocus(); msg = "A text box was grabbing your keys - released." end
+                    end)
+                    note(msg)
+                end },
+                { "Show / Hide Key HUD", false, function()
+                    _G.NoVR_HUD_Visible = not _G.NoVR_HUD_Visible
+                    if hudLabel then hudLabel.Visible = _G.NoVR_HUD_Visible end
+                    note(_G.NoVR_HUD_Visible and "Key HUD shown." or "Key HUD hidden.")
+                end },
+                { "Rejoin Server", false, function()
+                    closePause()
+                    pcall(function() game:GetService("TeleportService"):Teleport(game.PlaceId, lp) end)
+                end },
+            }
+            -- centre panel: title + the six buttons
+            local cs = center.sg
+            local title = lbl(cs, "P A U S E D", 0, 14, 420, 44, 34, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+            grad(title, C(255, 255, 255), C(190, 150, 255), 0)
+            lbl(cs, "No-VR  |  Edited by @N4THAFTER", 0, 62, 420, 18, 12, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+            lbl(cs, "v" .. SCRIPT_VERSION, 0, 82, 420, 16, 11, MUTED, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+            local rowObjs = {}
+            for i, r in ipairs(ROWS) do
+                local y = 118 + (i - 1) * 70
+                local holder = Instance.new("Frame")
+                holder.AnchorPoint = Vector2.new(0.5, 0)
+                holder.Position = UDim2.fromOffset(210, y)
+                holder.Size = UDim2.fromOffset(360, 56)
+                holder.BackgroundTransparency = 1
+                holder.Parent = cs
+                local rs = Instance.new("UIScale")
+                rs.Parent = holder
+                local body = Instance.new("CanvasGroup")
+                body.Size = UDim2.fromScale(1, 1)
+                body.BackgroundColor3 = Color3.new(1, 1, 1)
+                body.BackgroundTransparency = r[2] and 1 or 0.84
+                body.BorderSizePixel = 0
+                body.Parent = holder
+                corner(body, 16)
+                local sk = stroke(body, C(215, 185, 255), 1.5, 0.45)
+                if r[2] then
+                    local btn = Instance.new("TextButton")
+                    btn.Size = UDim2.fromScale(1, 1)
+                    btn.AutoButtonColor = false
+                    btn.Active = false
+                    btn.BorderSizePixel = 0
+                    btn.Text = ""
+                    btn.BackgroundColor3 = Color3.new(1, 1, 1)
+                    btn.Parent = body
+                    corner(btn, 16)
+                    gradButton(btn, r[1], PINK, VIOLET, 0, 16, 18, Enum.Font.GothamBlack)
+                else
+                    local tl = Instance.new("TextLabel")
+                    tl.Size = UDim2.fromScale(1, 1)
+                    tl.BackgroundTransparency = 1
+                    tl.Font = Enum.Font.GothamBold
+                    tl.TextSize = 16
+                    tl.TextColor3 = WHITE
+                    tl.Text = r[1]
+                    tl.Parent = body
+                end
+                local sweep = Instance.new("Frame")
+                sweep.AnchorPoint = Vector2.new(0.5, 0.5)
+                sweep.Position = UDim2.new(0, -60, 0.5, 0)
+                sweep.Size = UDim2.fromOffset(60, 120)
+                sweep.Rotation = 25
+                sweep.BackgroundColor3 = Color3.new(1, 1, 1)
+                sweep.BorderSizePixel = 0
+                sweep.ZIndex = 5
+                sweep.Parent = body
+                local swg = Instance.new("UIGradient")
+                swg.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0.75), NumberSequenceKeypoint.new(1, 1) })
+                swg.Parent = sweep
+                rowObjs[i] = { rs = rs, body = body, sk = sk, sweep = sweep, primary = r[2], y = y }
+            end
+            local function rowEnter(o)
+                tw(o.rs, 0.35, { Scale = 1.05 }, Enum.EasingStyle.Back)
+                if not o.primary then tw(o.body, 0.3, { BackgroundTransparency = 0.68 }, Enum.EasingStyle.Quad) end
+                tw(o.sk, 0.3, { Transparency = 0.05 }, Enum.EasingStyle.Quad)
+                o.sweep.Position = UDim2.new(0, -60, 0.5, 0)
+                tw(o.sweep, 0.7, { Position = UDim2.new(1, 60, 0.5, 0) }, Enum.EasingStyle.Quad)
+            end
+            local function rowLeave(o)
+                tw(o.rs, 0.4, { Scale = 1 }, Enum.EasingStyle.Back)
+                if not o.primary then tw(o.body, 0.3, { BackgroundTransparency = 0.84 }, Enum.EasingStyle.Quad) end
+                tw(o.sk, 0.3, { Transparency = 0.45 }, Enum.EasingStyle.Quad)
+            end
+            -- left panel: what this is
+            local ls = left.sg
+            lbl(ls, "VR HANDS", 0, 22, 340, 30, 24, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+            local info = {
+                "No-VR  |  Edited by @N4THAFTER", "Version " .. SCRIPT_VERSION, "",
+                "Mouse - look around", "W A S D - fly", "Space / Shift - up / down", "Left Alt - free cursor",
+            }
+            for i, tx in ipairs(info) do lbl(ls, tx, 0, 70 + (i - 1) * 28, 340, 20, 13, i <= 2 and WHITE or MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center) end
+            -- right panel: shortcuts
+            local rp = right.sg
+            lbl(rp, "SHORTCUTS", 0, 22, 340, 30, 24, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+            local keysT = { "`  /  Pause  -  this menu", "Ctrl + K  /  Home  -  full menu", "Right Ctrl  -  key HUD", "Esc  -  leave this menu", "", "Aim with the crosshair,", "click to choose" }
+            for i, tx in ipairs(keysT) do lbl(rp, tx, 0, 70 + (i - 1) * 28, 340, 20, 13, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center) end
+
+            -- crosshair + hint (on screen)
+            local ring = Instance.new("Frame")
+            ring.AnchorPoint = Vector2.new(0.5, 0.5)
+            ring.Position = UDim2.fromScale(0.5, 0.5)
+            ring.Size = UDim2.fromOffset(26, 26)
+            ring.BackgroundTransparency = 1
+            ring.Parent = g
+            corner(ring, 26)
+            local rst = stroke(ring, WHITE, 2, 0.1)
+            local rsc = Instance.new("UIScale")
+            rsc.Parent = ring
+            local dot = Instance.new("Frame")
+            dot.AnchorPoint = Vector2.new(0.5, 0.5)
+            dot.Position = UDim2.fromScale(0.5, 0.5)
+            dot.Size = UDim2.fromOffset(4, 4)
+            dot.BackgroundColor3 = WHITE
+            dot.BorderSizePixel = 0
+            dot.Parent = g
+            corner(dot, 4)
+            local hint = lbl(g, "Aim with the crosshair   -   Click to choose   -   ` or Esc to leave", 0, 0, 100, 20, 12, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+            hint.AnchorPoint = Vector2.new(0.5, 1)
+            hint.Position = UDim2.new(0.5, 0, 1, -24)
+            hint.Size = UDim2.fromOffset(700, 20)
+            themeWatch(g, { g })
+            for _, p in ipairs(panels) do themeWatch(g, { p.sg }) end
+
+            local hoverIdx = nil
+            local t0 = os.clock()
+            local closingAt = nil
+            local rc, ic
+            local function done()
+                if rc then rc:Disconnect() rc = nil end
+                if ic then ic:Disconnect() ic = nil end
+                folder:Destroy()
+                S.uiLook = false
+                tw(dof, 0.5, { NearIntensity = 0, FarIntensity = 0 }, Enum.EasingStyle.Sine)
+                task.delay(0.6, function() dof:Destroy() end)
+                pcall(function() UIS.MouseIconEnabled = true end)
+            end
+            rc = RunService.RenderStepped:Connect(function()
+                if not folder.Parent then done() return end
+                if pauseGui ~= g and not closingAt then closingAt = os.clock() end
+                local a = closingAt and (1 - (os.clock() - closingAt) / 0.35) or (((os.clock() - t0) / 0.9))
+                if closingAt and a <= 0 then done() return end
+                a = math.clamp(a, 0, 1)
+                local ea = closingAt and a or (1 + 2.70158 * (a - 1) ^ 3 + 1.70158 * (a - 1) ^ 2)   -- ease-out-back going in
+                if not closingAt then
+                    UIS.MouseBehavior = Enum.MouseBehavior.LockCenter   -- the cursor stays on the crosshair; the mouse turns your head
+                    UIS.MouseIconEnabled = false
+                end
+                local base = cam.CFrame   -- where you are looking now
+                for _, p in ipairs(panels) do   -- the panels never move (apart from flying in); only your view does
+                    local d = DIST * (0.55 + 0.45 * ea)
+                    local pos = CFrame.Angles(0, p.theta * ea, 0) * Vector3.new(0, p.yOff, -d)
+                    local cf = CFrame.lookAt(pos, Vector3.new(0, pos.Y, 0))
+                    local k = 0.5 + 0.5 * ea
+                    p.part.Size = Vector3.new(p.w * k, p.h * k, 0.1)
+                    p.part.CFrame = base0 * cf
+                end
+                veil.CFrame = base * CFrame.new(0, 0, -3) * CFrame.Angles(0, math.pi, 0)
+                veil.Transparency = 1 - 0.55 * (closingAt and a or math.clamp((os.clock() - t0) / 0.6, 0, 1))
+                -- what is under the crosshair? (the ray from the camera centre against the centre panel)
+                local newIdx = nil
+                if not closingAt and ea > 0.85 then
+                    local pcf = center.part.CFrame
+                    local n = pcf.LookVector
+                    local dn = base.LookVector:Dot(n)
+                    if math.abs(dn) > 1e-4 then
+                        local tHit = (pcf.Position - base.Position):Dot(n) / dn
+                        if tHit > 0 then
+                            local l = pcf:PointToObjectSpace(base.Position + base.LookVector * tHit)
+                            local w, h = center.part.Size.X, center.part.Size.Y
+                            if math.abs(l.X) <= w / 2 and math.abs(l.Y) <= h / 2 then
+                                local px, py = (0.5 - l.X / w) * center.cw, (0.5 - l.Y / h) * center.ch
+                                for i, o in ipairs(rowObjs) do
+                                    if px >= 30 and px <= 390 and py >= o.y and py <= o.y + 56 then newIdx = i break end
+                                end
+                            end
+                        end
+                    end
+                end
+                if newIdx ~= hoverIdx then
+                    if hoverIdx then rowLeave(rowObjs[hoverIdx]) end
+                    hoverIdx = newIdx
+                    if hoverIdx then rowEnter(rowObjs[hoverIdx]) end
+                    tw(rsc, 0.25, { Scale = hoverIdx and 1.45 or 1 }, Enum.EasingStyle.Back)
+                    tw(rst, 0.2, { Color = hoverIdx and PINK or WHITE }, Enum.EasingStyle.Quad)
+                end
+            end)
+            ic = UIS.InputBegan:Connect(function(io, gp)
+                if closingAt then return end
+                if io.UserInputType == Enum.UserInputType.MouseButton1 and hoverIdx then
+                    local f = ROWS[hoverIdx][3]
+                    task.defer(f)
+                end
+            end)
+        end
+
+        local function openPause()
+            if pauseGui or loaderActive then return end
+            if not IS_MOBILE and not _G.NoVR_Pause2D and not S.pop.flat then   -- PC: the 3D pause menu (falls back to the flat one if it can't be built)
+                local ok3, e3 = pcall(open3D)
+                if ok3 then return end
+                warn("[NoVR] 3D pause menu failed, using the flat one: " .. tostring(e3))
+                _G.NoVR_Pause2D = true
+                pcall(function()
+                    if pauseGui then pauseGui:Destroy() end
+                    pauseGui = nil
+                    for _, n in ipairs({ "NoVR_PauseDoF" }) do local o = Lighting:FindFirstChild(n) if o then o:Destroy() end end
+                    local fo = cam:FindFirstChild("NoVR_PausePanels")
+                    if fo then fo:Destroy() end
+                end)
+            end
+            S.menuOpen = true
+            setLook(false)
+            local pgui = lp:WaitForChild("PlayerGui")
+            local oldP = pgui:FindFirstChild("NoVR_Pause")
+            if oldP then oldP:Destroy() end
+            local oldB = Lighting:FindFirstChild("NoVR_PauseBlur")
+            if oldB then oldB:Destroy() end
+            pauseBlur = Instance.new("BlurEffect")
+            pauseBlur.Name = "NoVR_PauseBlur"
+            pauseBlur.Size = 0
+            pauseBlur.Parent = Lighting
+            tw(pauseBlur, 0.7, { Size = IS_MOBILE and 24 or 50 }, Enum.EasingStyle.Quint)
+
+            local g = Instance.new("ScreenGui")
+            g.Name = "NoVR_Pause"
+            g.ResetOnSpawn = false
+            g.IgnoreGuiInset = true
+            pcall(function() g.ScreenInsets = Enum.ScreenInsets.None end)
+            pcall(function() g.ScreenInsets = Enum.ScreenInsets.None end)
+            g.DisplayOrder = 150
+            g.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+            g.Parent = pgui
+            pauseGui = g
+
+            -- the liquid wave: a purple glass disc grows from the centre past the screen edges, then melts away
+            local wave = Instance.new("Frame")
+            wave.AnchorPoint = Vector2.new(0.5, 0.5)
+            wave.Position = UDim2.fromScale(0.5, 0.5)
+            wave.Size = UDim2.fromOffset(40, 40)
+            wave.BackgroundColor3 = Theme.tint(C(120, 70, 230))
+            wave.BackgroundTransparency = 0.35
+            wave.BorderSizePixel = 0
+            wave.ZIndex = 1
+            wave:SetAttribute("tc", true)
+            wave.Parent = g
+            corner(wave, 4000)
+            local wave2 = wave:Clone()   -- a second, lighter ring that trails the first, so the edge looks like liquid
+            wave2.BackgroundColor3 = Theme.tint(C(190, 140, 255))
+            wave2.BackgroundTransparency = 0.6
+            wave2.Parent = g
+            tw(wave, 0.7, { Size = UDim2.fromOffset(3600, 3600) }, Enum.EasingStyle.Quint)
+            task.delay(0.08, function() if wave2.Parent then tw(wave2, 0.8, { Size = UDim2.fromOffset(3400, 3400) }, Enum.EasingStyle.Quint) end end)
+            task.delay(0.35, function() if wave.Parent then tw(wave, 0.9, { BackgroundTransparency = 1 }, Enum.EasingStyle.Sine) end end)
+            task.delay(0.4, function() if wave2.Parent then tw(wave2, 0.9, { BackgroundTransparency = 1 }, Enum.EasingStyle.Sine) end end)
+            task.delay(1.4, function() if wave.Parent then wave:Destroy() end if wave2.Parent then wave2:Destroy() end end)
+
+            local shell = Instance.new("CanvasGroup")   -- everything else lives in here so it can fade as one piece
+            shell.Name = "Shell"
+            shell.Size = UDim2.fromScale(1, 1)
+            shell.BackgroundTransparency = 1
+            shell.GroupTransparency = 1
+            shell.ZIndex = 2
+            shell.Parent = g
+            tw(shell, 0.5, { GroupTransparency = 0 }, Enum.EasingStyle.Quad)
+            local dim = Instance.new("Frame")   -- a soft theme tint over the blurred game (also swallows clicks)
+            dim.Size = UDim2.fromScale(1, 1)
+            dim.BackgroundColor3 = Color3.new(1, 1, 1)
+            dim.BackgroundTransparency = 0.45
+            dim.BorderSizePixel = 0
+            dim.Active = true
+            dim.Parent = shell
+            grad(dim, C(60, 26, 130), C(10, 6, 34), 60)
+
+            local stage = Instance.new("Frame")
+            stage.Name = "Stage"
+            stage.AnchorPoint = Vector2.new(0.5, 0.5)
+            stage.Position = UDim2.fromScale(0.5, 0.5)
+            stage.Size = UDim2.fromOffset(420, 560)
+            stage.BackgroundTransparency = 1
+            stage.Parent = shell
+            local fitS = Instance.new("UIScale")
+            fitS.Parent = stage
+            local function refit()
+                local v = cam.ViewportSize
+                fitS.Scale = math.clamp(math.min(v.X / 480, v.Y / 620), 0.5, 1.4)
+            end
+            refit()
+            local vpc = cam:GetPropertyChangedSignal("ViewportSize"):Connect(refit)
+            g.Destroying:Connect(function() vpc:Disconnect() end)
+
+            local title = lbl(stage, "P A U S E D", 0, 6, 420, 44, 34, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+            grad(title, C(255, 255, 255), C(190, 150, 255), 0)
+            lbl(stage, "No-VR  |  Edited by @N4THAFTER", 0, 54, 420, 18, 12, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+            lbl(stage, "v" .. SCRIPT_VERSION, 0, 74, 420, 16, 11, MUTED, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+
+            local function note(txt)
+                pcall(function() game:GetService("StarterGui"):SetCore("SendNotification", { Title = "Pause menu", Text = txt, Duration = 3 }) end)
+            end
+            local ROWS = {
+                { "Resume", true, function() closePause() end },
+                { "Open Menu", false, function()
+                    closePause()
+                    task.delay(0.4, function() pcall(function() hudApi.openStart() end) end)
+                end },
+                { "Reset VR Rig", false, function()
+                    closePause()
+                    task.delay(0.3, function() pcall(function() S.rigReset(false) end) end)
+                end },
+                { "Fix Controls", false, function()
+                    local msg = "Nothing was stuck."
+                    pcall(function()
+                        local tb = UIS:GetFocusedTextBox()
+                        if tb then tb:ReleaseFocus(); msg = "A text box was grabbing your keys - released." end
+                    end)
+                    note(msg)
+                end },
+                { "Show / Hide Key HUD", false, function()
+                    _G.NoVR_HUD_Visible = not _G.NoVR_HUD_Visible
+                    if hudLabel then hudLabel.Visible = _G.NoVR_HUD_Visible end
+                    note(_G.NoVR_HUD_Visible and "Key HUD shown." or "Key HUD hidden.")
+                end },
+                { "Rejoin Server", false, function()
+                    closePause()
+                    pcall(function() game:GetService("TeleportService"):Teleport(game.PlaceId, lp) end)
+                end },
+            }
+            for i, r in ipairs(ROWS) do
+                local y = 110 + (i - 1) * 66
+                local holder = Instance.new("Frame")   -- moves and tilts into place
+                holder.AnchorPoint = Vector2.new(0.5, 0)
+                holder.Position = UDim2.fromOffset(210, y + 34)
+                holder.Size = UDim2.fromOffset(360, 54)
+                holder.BackgroundTransparency = 1
+                holder.Rotation = (i % 2 == 0) and 3 or -3
+                holder.Parent = stage
+                local rs = Instance.new("UIScale")
+                rs.Scale = 0.94
+                rs.Parent = holder
+                local body = Instance.new("CanvasGroup")
+                body.Size = UDim2.fromScale(1, 1)
+                body.BackgroundColor3 = Color3.new(1, 1, 1)
+                body.BackgroundTransparency = r[2] and 1 or 0.84
+                body.BorderSizePixel = 0
+                body.GroupTransparency = 1
+                body.Parent = holder
+                corner(body, 16)
+                local sk = stroke(body, C(215, 185, 255), 1.5, 0.45)
+                local btn
+                if r[2] then   -- the main button: the script's purple gradient
+                    btn = Instance.new("TextButton")
+                    btn.Size = UDim2.fromScale(1, 1)
+                    btn.AutoButtonColor = false
+                    btn.BorderSizePixel = 0
+                    btn.Text = ""
+                    btn.BackgroundColor3 = Color3.new(1, 1, 1)
+                    btn.Parent = body
+                    corner(btn, 16)
+                    gradButton(btn, r[1], PINK, VIOLET, 0, 16, 18, Enum.Font.GothamBlack)
+                else
+                    btn = Instance.new("TextButton")
+                    btn.Size = UDim2.fromScale(1, 1)
+                    btn.BackgroundTransparency = 1
+                    btn.AutoButtonColor = false
+                    btn.BorderSizePixel = 0
+                    btn.Font = Enum.Font.GothamBold
+                    btn.TextSize = 16
+                    btn.TextColor3 = WHITE
+                    btn.Text = r[1]
+                    btn.Parent = body
+                end
+                local sweep = Instance.new("Frame")   -- shimmer that crosses the button on hover
+                sweep.AnchorPoint = Vector2.new(0.5, 0.5)
+                sweep.Position = UDim2.new(0, -60, 0.5, 0)
+                sweep.Size = UDim2.fromOffset(60, 120)
+                sweep.Rotation = 25
+                sweep.BackgroundColor3 = Color3.new(1, 1, 1)
+                sweep.BorderSizePixel = 0
+                sweep.ZIndex = 5
+                sweep.Active = false
+                sweep.Parent = body
+                local swg = Instance.new("UIGradient")
+                swg.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0.75), NumberSequenceKeypoint.new(1, 1) })
+                swg.Parent = sweep
+                btn.MouseEnter:Connect(function()
+                    tw(rs, 0.35, { Scale = 1.03 }, Enum.EasingStyle.Back)
+                    if not r[2] then tw(body, 0.3, { BackgroundTransparency = 0.7 }, Enum.EasingStyle.Quad) end
+                    tw(sk, 0.3, { Transparency = 0.15 }, Enum.EasingStyle.Quad)
+                    sweep.Position = UDim2.new(0, -60, 0.5, 0)
+                    tw(sweep, 0.7, { Position = UDim2.new(1, 60, 0.5, 0) }, Enum.EasingStyle.Quad)
+                end)
+                btn.MouseLeave:Connect(function()
+                    tw(rs, 0.4, { Scale = 1 }, Enum.EasingStyle.Back)
+                    if not r[2] then tw(body, 0.3, { BackgroundTransparency = 0.84 }, Enum.EasingStyle.Quad) end
+                    tw(sk, 0.3, { Transparency = 0.45 }, Enum.EasingStyle.Quad)
+                end)
+                btn.InputBegan:Connect(function(io)
+                    if io.UserInputType == Enum.UserInputType.MouseButton1 or io.UserInputType == Enum.UserInputType.Touch then
+                        tw(rs, 0.1, { Scale = 0.95 }, Enum.EasingStyle.Quad)
+                    end
+                end)
+                btn.Activated:Connect(r[3])
+                task.delay(0.28 + 0.07 * i, function()   -- floats in one after another, settling out of a slight tilt
+                    if not holder.Parent then return end
+                    tw(holder, 0.8, { Position = UDim2.fromOffset(210, y), Rotation = 0 }, Enum.EasingStyle.Back)
+                    tw(rs, 0.7, { Scale = 1 }, Enum.EasingStyle.Back)
+                    tw(body, 0.5, { GroupTransparency = 0 }, Enum.EasingStyle.Quad)
+                end)
+            end
+            lbl(stage, "` or Pause key to resume   |   Ctrl + K opens the full menu", 0, 512, 420, 16, 11, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+            themeWatch(g, { shell })
+        end
+        hudApi.openPause = openPause
+        hudApi.closePause = closePause
+        hudApi.isPaused = function() return pauseGui ~= nil end
+        end
+
         local function showLoader()
             loaderActive = true
             S.menuOpen = true
@@ -17130,14 +18305,7 @@ task.spawn(function()
             lblur.Parent = Lighting
             tw(lblur, 0.6, { Size = IS_MOBILE and 12 or 30 }, Enum.EasingStyle.Sine)
 
-            local g = Instance.new("ScreenGui")
-            g.Name = "NoVR_Loader"
-            g.ResetOnSpawn = false
-            g.IgnoreGuiInset = true
-            pcall(function() g.ScreenInsets = Enum.ScreenInsets.None end)
-            g.DisplayOrder = 200
-            g.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-            g.Parent = lp:WaitForChild("PlayerGui")
+            local g = S.mkRoot("NoVR_Loader", 200, lp:WaitForChild("PlayerGui"), lblur)
 
             local back = Instance.new("Frame")   -- dark backdrop, also swallows clicks
             back.Size = UDim2.fromScale(1, 1)
@@ -17147,12 +18315,12 @@ task.spawn(function()
             back.Active = true
             back.Parent = g
             grad(back, C(46, 20, 112), C(8, 5, 28), 60)
-            tw(back, 0.5, { BackgroundTransparency = 0.04 })
+            tw(back, 0.5, { BackgroundTransparency = g:IsA("SurfaceGui") and 1 or 0.04 })
 
             local stage = Instance.new("Frame")
             stage.AnchorPoint = Vector2.new(0.5, 0.5)
             stage.Position = UDim2.fromScale(0.5, 0.5)
-            stage.Size = UDim2.fromOffset(520, 470)
+            stage.Size = UDim2.fromOffset(520, 610)
             stage.BackgroundTransparency = 1
             stage.Parent = g
             local fitS = Instance.new("UIScale")
@@ -17330,6 +18498,77 @@ task.spawn(function()
             fill.Parent = track
             corner(fill, 3)
             grad(fill, PINK, VIOLET, 0)
+            for _, t in ipairs({ title, sub, status, pct, track }) do t.ZIndex = 3 end
+            -- ===== card layout: a glass card behind the title / bar, and a stack of small step rows that fill one after another =====
+            local lfx = { cards = {} }
+            pcall(function()
+                local function lcard(x, y, w, h, rot, delay)
+                    local sh = softBox(stage, x - 4, y - 2, w + 8, h + 4, C(2, 0, 14), 20, 10, 0.9, 18)
+                    sh.Rotation = rot
+                    local f = Instance.new("Frame")
+                    f.Position = UDim2.fromOffset(x, y + 24)
+                    f.Size = UDim2.fromOffset(w, h)
+                    f.Rotation = rot + 3
+                    f.BackgroundColor3 = Color3.new(1, 1, 1)
+                    f.BackgroundTransparency = 0.12
+                    f.BorderSizePixel = 0
+                    f.ZIndex = 1
+                    f.Parent = stage
+                    corner(f, 18)
+                    grad(f, C(96, 56, 196), C(30, 16, 78), 90)
+                    stroke(f, C(215, 185, 255), 1.5, 0.5)
+                    lfx.cards[#lfx.cards + 1] = { f = f, sh = sh, y = y }
+                    task.delay(delay, function()
+                        if not f.Parent then return end
+                        tw(f, 0.75, { Position = UDim2.fromOffset(x, y), Rotation = rot }, Enum.EasingStyle.Back)
+                        softFade(sh, true, 0.7)
+                    end)
+                    return f
+                end
+                local main = lcard(60, 326, 400, 142, -1.0, 0.25)
+                local acc = Instance.new("Frame")
+                acc.Position = UDim2.fromOffset(18, 0)
+                acc.Size = UDim2.new(1, -36, 0, 3)
+                acc.BackgroundColor3 = Color3.new(1, 1, 1)
+                acc.BorderSizePixel = 0
+                acc.Parent = main
+                corner(acc, 2)
+                grad(acc, PINK, C(255, 160, 230), 0)
+                local STEPS = { { "Initializing", 0, 0.2 }, { "Hooking VR input", 0.2, 0.45 }, { "Hands", 0.45, 0.7 }, { "Building menu", 0.7, 1 } }
+                local fills = {}
+                for i, st in ipairs(STEPS) do
+                    local r = lcard(90, 480 + (i - 1) * 32, 340, 26, (i % 2 == 0) and 0.6 or -0.5, 0.4 + i * 0.08)
+                    lbl(r, st[1], 14, 0, 150, 26, 13, WHITE, Enum.Font.GothamMedium, Enum.TextXAlignment.Left)
+                    local tk = Instance.new("Frame")
+                    tk.Position = UDim2.fromOffset(160, 10)
+                    tk.Size = UDim2.fromOffset(150, 6)
+                    tk.BackgroundColor3 = Color3.new(1, 1, 1)
+                    tk.BackgroundTransparency = 0.8
+                    tk.BorderSizePixel = 0
+                    tk.Parent = r
+                    corner(tk, 3)
+                    local fl = Instance.new("Frame")
+                    fl.Size = UDim2.new(0, 0, 1, 0)
+                    fl.BackgroundColor3 = Color3.new(1, 1, 1)
+                    fl.BorderSizePixel = 0
+                    fl.Parent = tk
+                    corner(fl, 3)
+                    grad(fl, PINK, VIOLET, 0)
+                    fills[i] = fl
+                end
+                function lfx.rows(p)
+                    for i, st in ipairs(STEPS) do
+                        local k = math.clamp((p - st[2]) / (st[3] - st[2]), 0, 1)
+                        tw(fills[i], 0.5, { Size = UDim2.new(k, 0, 1, 0) }, Enum.EasingStyle.Sine)
+                    end
+                end
+                function lfx.exit()
+                    for _, c in ipairs(lfx.cards) do
+                        tw(c.f, 0.4, { Position = UDim2.new(c.f.Position.X.Scale, c.f.Position.X.Offset, 0, c.y + 24), BackgroundTransparency = 1 }, Enum.EasingStyle.Sine)
+                        softFade(c.sh, false, 0.4)
+                    end
+                end
+            end)
 
             -- MELENITE wordmark (soft 3D letters with a floor reflection) replaces the old M when pictures can be loaded
             local wmA = brandAsset("wm")
@@ -17412,10 +18651,12 @@ task.spawn(function()
                     pcall(rawOpenStart)
                 end
             end)
+            themeWatch(g)
             -- loading steps
             task.spawn(function()
                 local function step(p, txt, wait)
                     status.Text = txt
+                    if lfx.rows then pcall(lfx.rows, p) end
                     tw(fill, 0.55, { Size = UDim2.new(p, 0, 1, 0) }, Enum.EasingStyle.Sine)
                     task.wait(wait)
                 end
@@ -17437,6 +18678,7 @@ task.spawn(function()
                 tw(shadowF, 0.4, { BackgroundTransparency = 1 })
                 for _, t in ipairs(texts) do tw(t, 0.4, { TextTransparency = 1 }) end
                 tw(track, 0.4, { BackgroundTransparency = 1 })
+                if lfx.exit then pcall(lfx.exit) end
                 tw(fill, 0.4, { BackgroundTransparency = 1 })
                 tw(back, 0.6, { BackgroundTransparency = 1 }, Enum.EasingStyle.Sine)
                 tw(lblur, 0.6, { Size = 0 }, Enum.EasingStyle.Sine)
@@ -17545,16 +18787,9 @@ task.spawn(function()
             gblur.Name = "NoVR_GateBlur"
             gblur.Size = 0
             gblur.Parent = Lighting
-            tw(gblur, 0.6, { Size = IS_MOBILE and 12 or 30 }, Enum.EasingStyle.Sine)
+            tw(gblur, 0.6, { Size = IS_MOBILE and 20 or 46 }, Enum.EasingStyle.Sine)   -- very blurry background
 
-            local g = Instance.new("ScreenGui")
-            g.Name = "NoVR_Gate"
-            g.ResetOnSpawn = false
-            g.IgnoreGuiInset = true
-            pcall(function() g.ScreenInsets = Enum.ScreenInsets.None end)
-            g.DisplayOrder = 199   -- just under the loading screen (200)
-            g.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-            g.Parent = pg0
+            local g = S.mkRoot("NoVR_Gate", 199, pg0, gblur)
 
             local back = Instance.new("Frame")
             back.Size = UDim2.fromScale(1, 1)
@@ -17564,19 +18799,20 @@ task.spawn(function()
             back.Active = true   -- swallows clicks meant for the game
             back.Parent = g
             grad(back, C(46, 20, 112), C(8, 5, 28), 60)
-            tw(back, 0.5, { BackgroundTransparency = 0.04 })
+            tw(back, 0.5, { BackgroundTransparency = g:IsA("SurfaceGui") and 1 or 0.04 })
 
             local stage = Instance.new("Frame")
             stage.AnchorPoint = Vector2.new(0.5, 0.5)
             stage.Position = UDim2.new(0.5, 0, 0.5, 26)
-            stage.Size = UDim2.fromOffset(520, 510)
+            stage.Size = UDim2.fromOffset(520, 640)
+            stage.ZIndex = 5
             stage.BackgroundTransparency = 1
             stage.Parent = g
             local fitS = Instance.new("UIScale")
             fitS.Parent = stage
             local function refit()
                 local v = cam.ViewportSize
-                fitS.Scale = math.clamp(math.min(v.X / 560, v.Y / 550), 0.5, 1.5)
+                fitS.Scale = math.clamp(math.min(v.X / 640, v.Y / 680), 0.42, 1.5)
             end
             refit()
             local vpConn = cam:GetPropertyChangedSignal("ViewportSize"):Connect(refit)
@@ -17584,6 +18820,41 @@ task.spawn(function()
 
             local alive = true
             local starting = false
+
+            -- soft glowing orbs drifting behind the card (drawn between the backdrop and the card)
+            local gateLayers, gateOrbs = {}, {}
+            do
+                local function orb(fx, fy, size, col, secs, depth)
+                    local layer = Instance.new("Frame")   -- the layer moves with the pointer; the orb drifts inside it
+                    layer.BackgroundTransparency = 1
+                    layer.Size = UDim2.fromScale(1, 1)
+                    layer.Parent = g
+                    gateLayers[#gateLayers + 1] = { f = layer, d = depth }
+                    local o = Instance.new("Frame")
+                    o.AnchorPoint = Vector2.new(0.5, 0.5)
+                    o.Position = UDim2.fromScale(fx, fy)
+                    o.Size = UDim2.fromOffset(size, size)
+                    o.BackgroundColor3 = col
+                    o.BackgroundTransparency = 1
+                    o.BorderSizePixel = 0
+                    o:SetAttribute("tc", true)   -- tinted by hand below
+                    o.Parent = layer
+                    gateOrbs[#gateOrbs + 1] = { o = o, s = size }
+                    Theme.listeners[#Theme.listeners + 1] = function() if o.Parent then o.BackgroundColor3 = Theme.tint(col) end end
+                    o.BackgroundColor3 = Theme.tint(col)
+                    corner(o, size)
+                    tw(o, 1.2, { BackgroundTransparency = 0.8 })
+                    task.spawn(function()
+                        while alive and o.Parent do
+                            tw(o, secs, { Position = UDim2.fromScale(math.clamp(fx + (math.random() - 0.5) * 0.18, 0.05, 0.95), math.clamp(fy + (math.random() - 0.5) * 0.18, 0.05, 0.95)) }, Enum.EasingStyle.Sine)
+                            task.wait(secs)
+                        end
+                    end)
+                end
+                orb(0.2, 0.25, 320, C(150, 80, 255), 6, 0.5)
+                orb(0.82, 0.72, 380, C(80, 110, 255), 7.5, 0.8)
+                orb(0.7, 0.18, 220, C(230, 110, 255), 5.5, 1.3)
+            end
 
             -- ===== buttons =====
             local function mkBtn(parent, x, y, w, h, text, kind, onClick)
@@ -17626,17 +18897,195 @@ task.spawn(function()
                 f.Parent = stage
                 return f
             end
+            -- the neighbouring tabs: two frosted cards peeking out from behind the main one (their names run along the strip)
+            local TABS = { "Home", "Stats", "About" }
+            local ghostBox = Instance.new("Frame")
+            ghostBox.BackgroundTransparency = 1
+            ghostBox.Size = UDim2.fromScale(1, 1)
+            ghostBox.Parent = stage
+            local ghostLt, ghostRt
+            for _, side in ipairs({ -1, 1 }) do
+                local gf = Instance.new("Frame")
+                gf.AnchorPoint = Vector2.new(0.5, 0.5)
+                gf.Position = UDim2.fromOffset(260 + side * 360, 270)
+                gf.Size = UDim2.fromOffset(637, 444)
+                gf.BackgroundColor3 = Color3.new(1, 1, 1)
+                gf.BackgroundTransparency = 0.8
+                gf.BorderSizePixel = 0
+                gf.Parent = ghostBox
+                corner(gf, 24)
+                grad(gf, C(150, 100, 235), C(50, 24, 110), 90)
+                stroke(gf, C(215, 185, 255), 1.2, 0.65)
+                local gl = lbl(ghostBox, "", 260 + side * 385 - 100, 270 - 14, 200, 28, 13, MUTED, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+                gl.Rotation = side * 90
+                if side < 0 then ghostLt = gl else ghostRt = gl end
+            end
+            -- frosted glass card behind the welcome content
+            local card = Instance.new("Frame")
+            card.AnchorPoint = Vector2.new(0.5, 0.5)
+            card.Position = UDim2.fromOffset(260, 270)
+            card.Size = UDim2.fromOffset(724, 504)
+            card.BackgroundColor3 = Color3.new(1, 1, 1)
+            card.BackgroundTransparency = 0.5
+            card.BorderSizePixel = 0
+            card.Parent = stage
+            corner(card, 26)
+            grad(card, C(120, 76, 220), C(26, 14, 72), 90)
+            stroke(card, C(215, 185, 255), 1.5, 0.55)
+            local cardS = Instance.new("UIScale")
+            cardS.Scale = 0.92
+            cardS.Parent = card
+            tw(cardS, 0.7, { Scale = 1 }, Enum.EasingStyle.Back)
+            -- the glow layers, the card and the slabs lean with the mouse (or the last touch), nearer things move more
+            do
+                local ptr = nil
+                local pc = UIS.InputChanged:Connect(function(io)
+                    if io.UserInputType == Enum.UserInputType.MouseMovement or io.UserInputType == Enum.UserInputType.Touch then
+                        ptr = Vector2.new(io.Position.X, io.Position.Y)
+                    end
+                end)
+                local pb = UIS.InputBegan:Connect(function(io)
+                    if io.UserInputType == Enum.UserInputType.Touch then ptr = Vector2.new(io.Position.X, io.Position.Y) end
+                end)
+                local cur = Vector2.zero
+                local rc
+                rc = RunService.RenderStepped:Connect(function(dt)
+                    if not alive or not g.Parent then
+                        pc:Disconnect() pb:Disconnect() rc:Disconnect()
+                        return
+                    end
+                    local vp = cam.ViewportSize
+                    local p = ptr
+                    if not IS_MOBILE then p = UIS:GetMouseLocation() end
+                    local tgt = Vector2.zero
+                    if p and vp.X > 0 and vp.Y > 0 then
+                        tgt = Vector2.new(math.clamp((p.X - vp.X / 2) / (vp.X / 2), -1, 1), math.clamp((p.Y - vp.Y / 2) / (vp.Y / 2), -1, 1))
+                    end
+                    cur = cur + (tgt - cur) * math.min(1, dt * 5)
+                    for _, L in ipairs(gateLayers) do
+                        L.f.Position = UDim2.fromOffset(-cur.X * 34 * L.d, -cur.Y * 24 * L.d)
+                    end
+                    card.Position = UDim2.fromOffset(260 - cur.X * 7, 270 - cur.Y * 5)
+                end)
+            end
+            local shine = Instance.new("Frame")   -- thin light line along the top edge
+            shine.AnchorPoint = Vector2.new(0.5, 0)
+            shine.Position = UDim2.new(0.5, 0, 0, 1)
+            shine.Size = UDim2.new(0.7, 0, 0, 2)
+            shine.BackgroundColor3 = Color3.new(1, 1, 1)
+            shine.BackgroundTransparency = 0.55
+            shine.BorderSizePixel = 0
+            shine.Parent = card
+            corner(shine, 2)
             local pg1 = newPage(true)
             local pg2 = newPage(false)
+            local pg3 = newPage(false)
+            local pages = { pg1, pg2, pg3 }
             local pageNow = 1
-            local function showPage(n)
-                pageNow = n
-                pg1.Visible = n == 1
-                pg2.Visible = n == 2
-                local pg = (n == 1) and pg1 or pg2
-                pg.Position = UDim2.fromOffset(28, 0)
-                tw(pg, 0.4, { Position = UDim2.fromOffset(0, 0) })
+            local chips = {}
+            -- liquid switch animation: the blur surges, soft waves roll out from the side you moved towards, the glow orbs
+            -- swell and spring back, and the card squishes
+            local function liquid(dir)
+                tw(gblur, 0.22, { Size = IS_MOBILE and 28 or 56 }, Enum.EasingStyle.Quad)
+                task.delay(0.24, function() if gblur.Parent then tw(gblur, 1.0, { Size = IS_MOBILE and 20 or 46 }, Enum.EasingStyle.Sine) end end)
+                for i = 1, 3 do
+                    task.delay((i - 1) * 0.13, function()
+                        if not g.Parent then return end
+                        local r = Instance.new("Frame")
+                        r.AnchorPoint = Vector2.new(0.5, 0.5)
+                        r.Position = UDim2.fromScale(dir > 0 and 0.88 or 0.12, 0.5)
+                        r.Size = UDim2.fromOffset(60, 60)
+                        r.BackgroundColor3 = Theme.tint(C(200, 150, 255))
+                        r.BackgroundTransparency = 0.7
+                        r.BorderSizePixel = 0
+                        r.ZIndex = 2
+                        r:SetAttribute("tc", true)
+                        r.Parent = g
+                        corner(r, 2000)
+                        tw(r, 1.3, { Size = UDim2.fromOffset(2200, 2200), BackgroundTransparency = 1 }, Enum.EasingStyle.Quad)
+                        task.delay(1.4, function() r:Destroy() end)
+                    end)
+                end
+                for _, e in ipairs(gateOrbs) do
+                    if e.o.Parent then
+                        tw(e.o, 0.25, { Size = UDim2.fromOffset(e.s * 1.35, e.s * 1.35) }, Enum.EasingStyle.Quad)
+                        task.delay(0.25, function()
+                            if e.o.Parent then tw(e.o, 1.0, { Size = UDim2.fromOffset(e.s, e.s) }, Enum.EasingStyle.Elastic) end
+                        end)
+                    end
+                end
+                tw(cardS, 0.12, { Scale = 0.96 }, Enum.EasingStyle.Quad)
+                task.delay(0.12, function() tw(cardS, 0.8, { Scale = 1 }, Enum.EasingStyle.Elastic) end)
             end
+            local function showPage(n, dir)
+                n = ((n - 1) % #pages) + 1
+                dir = dir or ((n >= pageNow) and 1 or -1)
+                local changed = n ~= pageNow
+                pageNow = n
+                for i, p in ipairs(pages) do p.Visible = i == n end
+                card.Visible = n ~= 1
+                local pg = pages[n]
+                pg.Position = UDim2.fromOffset(dir * 90, 0)
+                tw(pg, 0.6, { Position = UDim2.fromOffset(0, 0) }, Enum.EasingStyle.Back)
+                ghostLt.Text = string.upper(TABS[(n - 2) % #TABS + 1])
+                ghostRt.Text = string.upper(TABS[n % #TABS + 1])
+                for i, c in ipairs(chips) do
+                    tw(c.f, 0.3, { BackgroundTransparency = i == n and 0.35 or 0.88 })
+                    c.t.TextColor3 = Theme.tint(i == n and WHITE or MUTED)
+                end
+                if changed then liquid(dir) end
+            end
+            -- arrows on the side strips, dots (tab names) under the card, and the Left / Right keys
+            local uiBox = Instance.new("Frame")
+            uiBox.BackgroundTransparency = 1
+            uiBox.Size = UDim2.fromScale(1, 1)
+            uiBox.ZIndex = 3
+            uiBox.Parent = stage
+            for _, side in ipairs({ -1, 1 }) do
+                local ab = Instance.new("TextButton")
+                ab.AnchorPoint = Vector2.new(0.5, 0.5)
+                ab.Position = UDim2.fromOffset(260 + side * 385, 215)
+                ab.Size = UDim2.fromOffset(34, 34)
+                ab.BackgroundColor3 = Color3.new(1, 1, 1)
+                ab.BackgroundTransparency = 0.7
+                ab.BorderSizePixel = 0
+                ab.AutoButtonColor = false
+                ab.Text = side < 0 and "<" or ">"
+                ab.Font = Enum.Font.GothamBlack
+                ab.TextSize = 18
+                ab.TextColor3 = WHITE
+                ab.Parent = uiBox
+                corner(ab, 17)
+                stroke(ab, C(215, 185, 255), 1.2, 0.5)
+                local asc = Instance.new("UIScale")
+                asc.Parent = ab
+                ab.MouseEnter:Connect(function() tw(asc, 0.35, { Scale = 1.15 }, Enum.EasingStyle.Back) end)
+                ab.MouseLeave:Connect(function() tw(asc, 0.4, { Scale = 1 }, Enum.EasingStyle.Back) end)
+                ab.Activated:Connect(function() showPage(pageNow + side, side) end)
+            end
+            for i, nm in ipairs(TABS) do
+                local cf = Instance.new("TextButton")
+                cf.AnchorPoint = Vector2.new(0.5, 0.5)
+                cf.Position = UDim2.fromOffset(260 + (i - 2) * 108, 553)
+                cf.Size = UDim2.fromOffset(96, 26)
+                cf.BackgroundColor3 = Color3.new(1, 1, 1)
+                cf.BackgroundTransparency = i == 1 and 0.35 or 0.88
+                cf.BorderSizePixel = 0
+                cf.AutoButtonColor = false
+                cf.Text = string.upper(nm)
+                cf.Font = Enum.Font.GothamBold
+                cf.TextSize = 11
+                cf.TextColor3 = Theme.tint(i == 1 and WHITE or MUTED)
+                cf:SetAttribute("tc", true)   -- its text colour is set by hand in showPage
+                cf.Parent = uiBox
+                corner(cf, 13)
+                stroke(cf, C(215, 185, 255), 1, 0.6)
+                chips[i] = { f = cf, t = cf }
+                cf.Activated:Connect(function() showPage(i) end)
+            end
+            ghostBox.Visible = false
+            uiBox.Visible = false
+            card.Visible = false
 
             local function goStart()
                 if starting then return end
@@ -17645,7 +19094,6 @@ task.spawn(function()
                 vpConn:Disconnect()
                 -- the extra loaders chosen on this screen start together with the loading screen
                 if Opt.m7 then runOpt("m7") end
-                if Opt.avcb then runOpt("avcb") end
                 if Opt.avcb2 then runOpt("avcb2") end
                 tw(gblur, 0.6, { Size = 0 }, Enum.EasingStyle.Sine)
                 task.delay(0.7, function() gblur:Destroy() end)
@@ -17653,88 +19101,296 @@ task.spawn(function()
                 task.delay(0.8, function() if g.Parent then g:Destroy() end end)
             end
 
-            -- ===== page 1: START / JOIN DISCORD / VIEW STATS =====
-            local title = lbl(pg1, "V R   H A N D S", 0, 40, 520, 44, 34, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
-            grad(title, C(255, 255, 255), C(190, 150, 255), 0)
-            lbl(pg1, "No-VR  |  Edited by @N4THAFTER", 0, 88, 520, 18, 12, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
-            lbl(pg1, "v" .. SCRIPT_VERSION, 0, 108, 520, 16, 11, MUTED, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
-
-            mkBtn(pg1, 110, 140, 300, 58, "START", "start", goStart)
-            local dcT
-            local _, t2 = mkBtn(pg1, 110, 208, 300, 44, "JOIN DISCORD", "discord", function()
-                dcT.Text = joinDiscord(nil, nil, function(t) if dcT.Parent then dcT.Text = t end end)
-                task.delay(2.4, function() if dcT.Parent then dcT.Text = "JOIN DISCORD" end end)
-            end)
-            dcT = t2
-            -- credits: Mois7 admin developers' Discord
-            local m7dT
-            local _, t3 = mkBtn(pg1, 110, 260, 300, 44, "MOIS7 DISCORD", "discord", function()
-                m7dT.Text = joinDiscord("https://discord.gg/dQ9NjDNmM", "dQ9NjDNmM")
-                task.delay(2.2, function() if m7dT.Parent then m7dT.Text = "MOIS7 DISCORD" end end)
-            end)
-            m7dT = t3
-            local credit = lbl(pg1, "Credits to Mois7 Admin developers, Here is their discord link!", 70, 306, 380, 30, 11, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
-            credit.TextWrapped = true
-            credit.TextTruncate = Enum.TextTruncate.None
-            credit.TextYAlignment = Enum.TextYAlignment.Top
-            mkBtn(pg1, 110, 340, 300, 44, "VIEW STATS", "glass", function() showPage(2) end)
-
-            -- extra scripts: Mois7 Admin  [NO][YES]   and under it   Better AntiVCB  [NO][YES]
-            lbl(pg1, "Load with this script?", 0, 396, 520, 16, 12, MUTED, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
-            local function mkOpt(y, text, key)
-                if OPT_DOWN[key] then   -- unavailable: red name and a red UNAVAILABLE in place of NO / YES
-                    local n1 = lbl(pg1, text, 110, y, 150, 34, 14, C(255, 110, 120), Enum.Font.GothamBold, Enum.TextXAlignment.Left)
-                    local n2 = lbl(pg1, "UNAVAILABLE", 262, y, 150, 34, 14, C(255, 110, 120), Enum.Font.GothamBlack, Enum.TextXAlignment.Left)
-                    n1:SetAttribute("tc", true) n2:SetAttribute("tc", true)
-                    return
+            -- ===== page 1 (home): card layout. A detail card with two switch bars on the left, a stack of list cards on the right,
+            -- a soft flash when it opens, then the cards fly in with a slight lean =====
+            local homeOk, homeErr = pcall(function()
+                local CARD_T, CARD_B = C(96, 56, 196), C(30, 16, 78)
+                local cards = {}
+                local function mkCard(x, y, w, h, rot, delay, dx, parent)
+                    parent = parent or pg1
+                    local sh = softBox(parent, x - 4, y - 2, w + 8, h + 4, C(2, 0, 14), 22, 10, 0.9, 20)
+                    sh.Rotation = rot
+                    local f = Instance.new("Frame")
+                    f.Position = UDim2.fromOffset(x + dx, y + 26)
+                    f.Size = UDim2.fromOffset(w, h)
+                    f.Rotation = rot + 4
+                    f.BackgroundColor3 = Color3.new(1, 1, 1)
+                    f.BackgroundTransparency = 0.1
+                    f.BorderSizePixel = 0
+                    f.ZIndex = 2
+                    f.Parent = parent
+                    corner(f, 18)
+                    grad(f, CARD_T, CARD_B, 90)
+                    stroke(f, C(215, 185, 255), 1.5, 0.5)
+                    cards[#cards + 1] = { f = f, sh = sh, x = x, y = y, rot = rot, delay = delay }
+                    return f
                 end
-                lbl(pg1, text, 110, y, 150, 34, 14, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Left)
-                local pair = {}
-                local function paint()
-                    for val, c in pairs(pair) do
-                        tw(c.sel, 0.25, { BackgroundTransparency = (val == Opt[key]) and 0 or 1 })
-                    end
-                end
-                local function mkChoice(x, label, val)
-                    local b = Instance.new("TextButton")
-                    b.Position = UDim2.fromOffset(x, y)
-                    b.Size = UDim2.fromOffset(72, 34)
-                    b.AutoButtonColor = false
-                    b.BackgroundColor3 = Color3.new(1, 1, 1)
-                    b.BackgroundTransparency = 0.86
-                    b.BorderSizePixel = 0
-                    b.Text = ""
-                    b.Parent = pg1
-                    corner(b, 10)
-                    stroke(b, C(215, 185, 255), 1.5, 0.4)
-                    local sel = Instance.new("Frame")   -- gradient fill shown on the chosen option
-                    sel.Size = UDim2.fromScale(1, 1)
-                    sel.BackgroundColor3 = Color3.new(1, 1, 1)
-                    sel.BackgroundTransparency = (val == Opt[key]) and 0 or 1
-                    sel.BorderSizePixel = 0
-                    sel.Active = false
-                    sel.Parent = b
-                    corner(sel, 10)
-                    grad(sel, PINK, VIOLET, 0)
-                    lbl(b, label, 0, 0, 72, 34, 14, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
-                    local sc2 = Instance.new("UIScale")
-                    sc2.Parent = b
-                    b.MouseEnter:Connect(function() tw(sc2, 0.4, { Scale = 1.06 }, Enum.EasingStyle.Back) end)
-                    b.MouseLeave:Connect(function() tw(sc2, 0.45, { Scale = 1 }, Enum.EasingStyle.Back) end)
-                    b.InputBegan:Connect(function(io) if isPress(io) then tw(sc2, 0.1, { Scale = 0.94 }); ripple(b, io, fitS.Scale) end end)
-                    b.InputEnded:Connect(function(io) if isPress(io) then tw(sc2, 0.45, { Scale = 1 }, Enum.EasingStyle.Back) end end)
-                    b.Activated:Connect(function()
-                        Opt[key] = val
-                        saveOpt(key, val)
-                        paint()
+                local function fly(c)
+                    task.delay(c.delay, function()
+                        if not c.f.Parent then return end
+                        tw(c.f, 0.75, { Position = UDim2.fromOffset(c.x, c.y), Rotation = c.rot }, Enum.EasingStyle.Back)
+                        softFade(c.sh, true, 0.7)
                     end)
-                    pair[val] = { sel = sel }
                 end
-                mkChoice(262, "NO", false)
-                mkChoice(338, "YES", true)
+
+                -- ---- left: detail card ----
+                local LX, LY, LW, LH = -170, 70, 270, 330
+                local left = mkCard(LX, LY, LW, LH, -1.8, 0.2, -70)
+                local acc = Instance.new("Frame")   -- bright line along the top edge
+                acc.Position = UDim2.fromOffset(18, 0)
+                acc.Size = UDim2.new(1, -36, 0, 3)
+                acc.BackgroundColor3 = Color3.new(1, 1, 1)
+                acc.BorderSizePixel = 0
+                acc.Parent = left
+                corner(acc, 2)
+                grad(acc, PINK, C(255, 160, 230), 0)
+                lbl(left, "V R   H A N D S", 0, 20, LW, 24, 18, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+                local dv = Instance.new("Frame")
+                dv.Position = UDim2.fromOffset(40, 54)
+                dv.Size = UDim2.fromOffset(LW - 80, 1)
+                dv.BackgroundColor3 = Color3.new(1, 1, 1)
+                dv.BackgroundTransparency = 0.7
+                dv.BorderSizePixel = 0
+                dv.Parent = left
+                local ic = Instance.new("Frame")   -- round badge
+                ic.Position = UDim2.fromOffset((LW - 100) / 2, 72)
+                ic.Size = UDim2.fromOffset(100, 100)
+                ic.BackgroundColor3 = Color3.new(1, 1, 1)
+                ic.BackgroundTransparency = 0.86
+                ic.BorderSizePixel = 0
+                ic.Parent = left
+                corner(ic, 50)
+                stroke(ic, C(215, 185, 255), 2, 0.35)
+                local icT = lbl(ic, "VR", 0, 0, 100, 100, 34, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+                icT.TextYAlignment = Enum.TextYAlignment.Center
+                grad(icT, C(255, 255, 255), C(190, 150, 255), 90)
+                local desc = lbl(left, "Play VR Hands with a mouse and keyboard: hands, flying and a full menu. No headset needed.", 22, 188, LW - 44, 54, 13, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+                desc.TextWrapped = true
+                desc.TextTruncate = Enum.TextTruncate.None
+                desc.TextYAlignment = Enum.TextYAlignment.Top
+                local chipF = Instance.new("Frame")
+                chipF.Position = UDim2.fromOffset(LW / 2 - 48, 254)
+                chipF.Size = UDim2.fromOffset(96, 26)
+                chipF.BackgroundColor3 = Color3.new(1, 1, 1)
+                chipF.BackgroundTransparency = 0.84
+                chipF.BorderSizePixel = 0
+                chipF.Parent = left
+                corner(chipF, 13)
+                stroke(chipF, GREEN, 1.2, 0.35)
+                local chipT = lbl(chipF, "Ready", 0, 0, 96, 26, 13, GREEN, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+                chipT:SetAttribute("tc", true)
+                lbl(left, "v" .. SCRIPT_VERSION .. "   |   No-VR", 0, 290, LW, 18, 12, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+                lbl(left, "Edited by @N4THAFTER", 0, 308, LW, 14, 11, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+
+                -- ---- left: two switch bars (the extra scripts) ----
+                local function mkBar(y, text, key, delay)
+                    local bar = mkCard(LX + 6, y, LW - 12, 44, -1.2, delay, -70)
+                    lbl(bar, text, 16, 0, 150, 44, 14, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Left)
+                    if OPT_DOWN[key] then   -- unavailable: red text instead of the switch
+                        local r1 = lbl(bar, "UNAVAILABLE", 130, 0, LW - 12 - 146, 44, 12, C(255, 110, 120), Enum.Font.GothamBlack, Enum.TextXAlignment.Right)
+                        r1:SetAttribute("tc", true)
+                        return
+                    end
+                    local stT = lbl(bar, "", LW - 12 - 120, 0, 46, 44, 13, WHITE, Enum.Font.GothamMedium, Enum.TextXAlignment.Right)
+                    local trk = Instance.new("TextButton")
+                    trk.Position = UDim2.fromOffset(LW - 12 - 62, 11)
+                    trk.Size = UDim2.fromOffset(50, 22)
+                    trk.AutoButtonColor = false
+                    trk.Text = ""
+                    trk.BorderSizePixel = 0
+                    trk.ZIndex = 4
+                    trk.Parent = bar
+                    corner(trk, 11)
+                    trk:SetAttribute("tc", true)
+                    local kn = Instance.new("Frame")
+                    kn.AnchorPoint = Vector2.new(0, 0.5)
+                    kn.Size = UDim2.fromOffset(16, 16)
+                    kn.BackgroundColor3 = WHITE
+                    kn.BorderSizePixel = 0
+                    kn.Active = false
+                    kn.ZIndex = 5
+                    kn.Parent = trk
+                    corner(kn, 8)
+                    local function paint(anim)
+                        local on = Opt[key] and true or false
+                        local col = on and Theme.tint(PINK) or C(70, 55, 105)
+                        local pos = on and UDim2.new(1, -19, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
+                        stT.Text = on and "On" or "Off"
+                        if anim then
+                            tw(trk, 0.22, { BackgroundColor3 = col }, Enum.EasingStyle.Sine)
+                            tw(kn, 0.22, { Position = pos }, Enum.EasingStyle.Back)
+                        else
+                            trk.BackgroundColor3 = col
+                            kn.Position = pos
+                        end
+                    end
+                    paint(false)
+                    trk.Activated:Connect(function()
+                        Opt[key] = not Opt[key]
+                        saveOpt(key, Opt[key])
+                        paint(true)
+                    end)
+                    Theme.listeners[#Theme.listeners + 1] = function() if trk.Parent then paint(false) end end
+                end
+                mkBar(414, "Mois7 Admin", "m7", 0.35)
+                mkBar(464, "Better Anti VCB", "avcb2", 0.42)
+                local capt = lbl(pg1, "Better Anti VCB runs on its own - you don't need M7 running to use it.", LX + 6, 514, LW - 12, 28, 10, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+                capt.TextWrapped = true
+                capt.TextTruncate = Enum.TextTruncate.None
+                capt.TextYAlignment = Enum.TextYAlignment.Top
+
+                -- a little round tag floating between the columns
+                local tag = Instance.new("Frame")
+                tag.AnchorPoint = Vector2.new(0.5, 0.5)
+                tag.Position = UDim2.fromOffset(124, 250)
+                tag.Size = UDim2.fromOffset(44, 44)
+                tag.BackgroundColor3 = Color3.new(1, 1, 1)
+                tag.BackgroundTransparency = 0.15
+                tag.BorderSizePixel = 0
+                tag.Parent = pg1
+                corner(tag, 22)
+                grad(tag, C(255, 190, 240), PINK, 90)
+                stroke(tag, WHITE, 2, 0.2)
+                lbl(tag, "VR", 0, 0, 44, 44, 14, WHITE, Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+                task.spawn(function()
+                    local t0 = os.clock()
+                    while tag.Parent do
+                        tag.Position = UDim2.fromOffset(124, 250 + math.sin((os.clock() - t0) * 1.6) * 5)
+                        task.wait()
+                    end
+                end)
+
+                -- ---- right: list cards ----
+                local RX, RW = 150, 540
+                local function mkItem(y, title, subT, hint, icon, glow, delay, rot, onClick)
+                    local it = mkCard(RX, y, RW, 74, rot, delay, 90)
+                    local strip = Instance.new("Frame")   -- coloured strip on the left edge, lights up on hover
+                    strip.Position = UDim2.fromOffset(0, 10)
+                    strip.Size = UDim2.fromOffset(5, 54)
+                    strip.BackgroundColor3 = glow
+                    strip.BackgroundTransparency = 0.6
+                    strip.BorderSizePixel = 0
+                    strip.Parent = it
+                    corner(strip, 3)
+                    local th = Instance.new("Frame")
+                    th.Position = UDim2.fromOffset(18, 10)
+                    th.Size = UDim2.fromOffset(84, 54)
+                    th.BackgroundColor3 = Color3.new(1, 1, 1)
+                    th.BackgroundTransparency = 0
+                    th.BorderSizePixel = 0
+                    th.Parent = it
+                    corner(th, 10)
+                    grad(th, glow, C(24, 12, 60), 60)
+                    stroke(th, C(215, 185, 255), 1, 0.5)
+                    drawIcon(th, icon)
+                    lbl(it, title, 118, 12, RW - 210, 26, 18, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Left)
+                    local subL = lbl(it, subT, 118, 40, RW - 210, 20, 13, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Left)
+                    local hb = Instance.new("Frame")
+                    hb.Position = UDim2.fromOffset(RW - 62, 21)
+                    hb.Size = UDim2.fromOffset(40, 32)
+                    hb.BackgroundTransparency = 1
+                    hb.BorderSizePixel = 0
+                    hb.Parent = it
+                    corner(hb, 8)
+                    stroke(hb, C(215, 185, 255), 1.5, 0.45)
+                    lbl(hb, hint, 0, 0, 40, 32, 12, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+                    local hit = Instance.new("TextButton")
+                    hit.Size = UDim2.fromScale(1, 1)
+                    hit.BackgroundTransparency = 1
+                    hit.Text = ""
+                    hit.AutoButtonColor = false
+                    hit.ZIndex = 8
+                    hit.Parent = it
+                    local c = cards[#cards]
+                    hit.MouseEnter:Connect(function()
+                        tw(it, 0.3, { Position = UDim2.fromOffset(RX - 12, y - 2) }, Enum.EasingStyle.Back)
+                        tw(strip, 0.25, { BackgroundTransparency = 0 })
+                        tw(it, 0.25, { BackgroundTransparency = 0.02 })
+                        tw(c.sh, 0.01, { Position = UDim2.fromOffset(RX - 16, y - 4) })
+                    end)
+                    hit.MouseLeave:Connect(function()
+                        tw(it, 0.35, { Position = UDim2.fromOffset(RX, y) }, Enum.EasingStyle.Back)
+                        tw(strip, 0.3, { BackgroundTransparency = 0.6 })
+                        tw(it, 0.3, { BackgroundTransparency = 0.1 })
+                        tw(c.sh, 0.01, { Position = UDim2.fromOffset(RX - 4, y - 2) })
+                    end)
+                    hit.InputBegan:Connect(function(io) if isPress(io) then tw(it, 0.1, { Size = UDim2.fromOffset(RW - 8, 70) }) ripple(it, io, fitS.Scale) end end)
+                    hit.InputEnded:Connect(function(io) if isPress(io) then tw(it, 0.35, { Size = UDim2.fromOffset(RW, 74) }, Enum.EasingStyle.Back) end end)
+                    hit.Activated:Connect(onClick)
+                    return subL
+                end
+                local function mkRow(y, name, value, frac, delay)   -- thin info rows under the first card, like small sliders
+                    local r = mkCard(RX + 22, y, RW - 44, 26, 0.5, delay, 90)
+                    lbl(r, name, 14, 0, 150, 26, 13, WHITE, Enum.Font.GothamMedium, Enum.TextXAlignment.Left)
+                    local trk = Instance.new("Frame")
+                    trk.Position = UDim2.fromOffset(150, 10)
+                    trk.Size = UDim2.fromOffset(RW - 44 - 150 - 110, 6)
+                    trk.BackgroundColor3 = Color3.new(1, 1, 1)
+                    trk.BackgroundTransparency = 0.8
+                    trk.BorderSizePixel = 0
+                    trk.Parent = r
+                    corner(trk, 3)
+                    local fl = Instance.new("Frame")
+                    fl.Size = UDim2.new(0, 0, 1, 0)
+                    fl.BackgroundColor3 = Color3.new(1, 1, 1)
+                    fl.BorderSizePixel = 0
+                    fl.Parent = trk
+                    corner(fl, 3)
+                    grad(fl, PINK, VIOLET, 0)
+                    task.delay(delay + 0.5, function() if fl.Parent then tw(fl, 0.8, { Size = UDim2.new(frac, 0, 1, 0) }, Enum.EasingStyle.Quint) end end)
+                    local vl = lbl(r, value, RW - 44 - 100, 0, 86, 26, 13, WHITE, Enum.Font.GothamBold, Enum.TextXAlignment.Right)
+                end
+                mkItem(70, "START", "Load the script and join the game", "GO", "go", C(150, 90, 255), 0.1, 1.0, goStart)
+                mkRow(150, "Version", "v" .. SCRIPT_VERSION, 0.9, 0.3)
+                mkRow(180, "Controls", IS_MOBILE and "Touch" or "Keyboard", 0.75, 0.36)
+                mkRow(210, "Auto update", (AUTO_UPDATE == true and not S.pop.noAuto) and "On" or "Off", 0.6, 0.42)
+                local dcSub
+                dcSub = mkItem(246, "JOIN DISCORD", "Chat, updates and support", "DC", "chat", C(110, 120, 255), 0.45, -0.8, function()
+                    dcSub.Text = joinDiscord(nil, nil, function(t) if dcSub.Parent then dcSub.Text = t end end)
+                    task.delay(2.4, function() if dcSub.Parent then dcSub.Text = "Chat, updates and support" end end)
+                end)
+                local m7Sub
+                m7Sub = mkItem(334, "MOIS7 DISCORD", "Credits to the Mois7 Admin developers", "M7", "m7", C(200, 100, 240), 0.55, 0.9, function()
+                    m7Sub.Text = joinDiscord("https://discord.gg/dQ9NjDNmM", "dQ9NjDNmM")
+                    task.delay(2.2, function() if m7Sub.Parent then m7Sub.Text = "Credits to the Mois7 Admin developers" end end)
+                end)
+                mkItem(422, "VIEW STATS", "Live status of Discord, Roblox and the script", ">", "stats", C(225, 135, 235), 0.65, -0.6, function() showPage(2) end)
+
+                -- footer hint, like the video
+                local fl2 = Instance.new("Frame")
+                fl2.AnchorPoint = Vector2.new(0.5, 0)
+                fl2.Position = UDim2.fromOffset(260, 556)
+                fl2.Size = UDim2.fromOffset(520, 1)
+                fl2.BackgroundColor3 = Color3.new(1, 1, 1)
+                fl2.BackgroundTransparency = 0.75
+                fl2.BorderSizePixel = 0
+                fl2.Parent = pg1
+                grad(fl2, C(255, 255, 255), C(255, 255, 255), 0)
+                lbl(pg1, "Aim with the crosshair  -  Click to choose  -  Alt frees the mouse  -  Left / Right switch tabs", -170, 566, 860, 16, 12, MUTED, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+
+                -- the opening flash, then every card flies in
+                local bloom = Instance.new("Frame")
+                bloom.AnchorPoint = Vector2.new(0.5, 0.5)
+                bloom.Position = UDim2.fromScale(0.5, 0.5)
+                bloom.Size = UDim2.fromOffset(0, 0)
+                bloom.BackgroundColor3 = Theme.tint(C(235, 215, 255))
+                bloom.BackgroundTransparency = 0.1
+                bloom.BorderSizePixel = 0
+                bloom.ZIndex = 9
+                bloom.Active = false
+                bloom:SetAttribute("tc", true)
+                bloom.Parent = g
+                corner(bloom, 4000)
+                tw(bloom, 0.95, { Size = UDim2.fromOffset(2600, 2600), BackgroundTransparency = 1 }, Enum.EasingStyle.Quad)
+                task.delay(1.05, function() bloom:Destroy() end)
+                for _, c in ipairs(cards) do fly(c) end
+            end)
+            if not homeOk then
+                warn("[NoVR] welcome layout failed: " .. tostring(homeErr))
+                mkBtn(pg1, 160, 280, 200, 50, "START", "start", goStart)
             end
-            mkOpt(418, "Mois7 Admin", "m7")
-            mkOpt(460, "Better AntiVCB", "avcb")
+            themeWatch(g, { back, card, pg1, pg3, ghostBox, uiBox })
+            task.defer(function() liquid(1) end)   -- the screen opens with the same liquid surge as the tab changes   -- welcome screen follows the script theme and the seasons (the stats page keeps its own status colours)
 
             -- ===== page 2: live stats =====
             local COLS = { ok = GREEN, warn = C(255, 205, 110), bad = C(255, 110, 120) }
@@ -17858,6 +19514,28 @@ task.spawn(function()
 
             mkBtn(pg2, 16, 446, 150, 46, "BACK", "glass", function() showPage(1) end)
             mkBtn(pg2, 344, 446, 160, 46, "START", "start", goStart)
+
+            -- ===== tab 3: ABOUT =====
+            lbl(pg3, "ABOUT", 24, 10, 300, 28, 22, WHITE, Enum.Font.GothamBlack)
+            do
+                local lines = {
+                    { "VR Hands No-VR", 17, WHITE, Enum.Font.GothamBlack },
+                    { "Version " .. SCRIPT_VERSION .. "   |   Edited by @N4THAFTER", 12, MUTED, Enum.Font.GothamBold },
+                    { "Credits to the Mois7 Admin developers - their Discord button is on the Home tab.", 12, MUTED, Enum.Font.GothamMedium },
+                    { "Better Anti VCB runs on its own - you don't need M7 running to use it.", 12, MUTED, Enum.Font.GothamMedium },
+                    { "Change tabs with the arrows, the tab buttons under the card, or the Left / Right keys. The background follows your mouse or finger, and the blur ripples when you switch.", 12, MUTED, Enum.Font.GothamMedium },
+                }
+                local y = 56
+                for _, ln in ipairs(lines) do
+                    local h = (ln[2] > 14) and 26 or 36
+                    local tl = lbl(pg3, ln[1], 24, y, 472, h, ln[2], ln[3], ln[4], Enum.TextXAlignment.Left)
+                    tl.TextWrapped = true
+                    tl.TextYAlignment = Enum.TextYAlignment.Top
+                    y = y + h + 10
+                end
+            end
+            mkBtn(pg3, 16, 446, 150, 46, "BACK", "glass", function() showPage(1, -1) end)
+            mkBtn(pg3, 344, 446, 160, 46, "START", "start", goStart)
 
             -- ===== fill the rows from freshly fetched data =====
             local function applyStats(d)
@@ -18247,14 +19925,7 @@ task.spawn(function()
         local annQueue, annBusy = {}, false
         local function showAnnounce(a, done)
             -- full-screen announcement, like the classic Roblox ones: the whole screen is covered, big centred text
-            local pgui = Instance.new("ScreenGui")
-            pgui.Name = "NoVR_Announce"
-            pgui.ResetOnSpawn = false
-            pgui.IgnoreGuiInset = true
-            pcall(function() pgui.ScreenInsets = Enum.ScreenInsets.None end)
-            pgui.DisplayOrder = 500
-            pgui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-            pgui.Parent = lp:WaitForChild("PlayerGui")
+            local pgui = S.mkFollow("NoVR_Announce", 500, lp:WaitForChild("PlayerGui"))
             local title = string.upper(cleanText(a.title ~= nil and a.title ~= "" and a.title or "ANNOUNCEMENT", 50))
             local msg = cleanText(a.message, 400)
             local by = cleanText(a.from or "", 32)
@@ -18373,14 +20044,7 @@ task.spawn(function()
             task.delay(secs, dismiss)
         end
         function Chat.inviteCard(m)
-            local pgui = Instance.new("ScreenGui")
-            pgui.Name = "NoVR_Invite"
-            pgui.ResetOnSpawn = false
-            pgui.IgnoreGuiInset = true
-            pcall(function() pgui.ScreenInsets = Enum.ScreenInsets.None end)
-            pgui.DisplayOrder = 450
-            pgui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-            pgui.Parent = lp:WaitForChild("PlayerGui")
+            local pgui = S.mkFollow("NoVR_Invite", 450, lp:WaitForChild("PlayerGui"))
             local W, H = 400, 150
             local holder = Instance.new("Frame")
             holder.AnchorPoint = Vector2.new(0.5, 0)
@@ -18911,14 +20575,7 @@ task.spawn(function()
             if S.pop.show == false and not force then return end
             S.popShown = true
             local T0 = S.pop.secs or 10
-            local pgui = Instance.new("ScreenGui")
-            pgui.Name = "NoVR_Popups"
-            pgui.ResetOnSpawn = false
-            pgui.IgnoreGuiInset = true
-            pcall(function() pgui.ScreenInsets = Enum.ScreenInsets.None end)
-            pgui.DisplayOrder = 103
-            pgui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-            pgui.Parent = lp:WaitForChild("PlayerGui")
+            local pgui = S.mkFollow("NoVR_Popups", 103, lp:WaitForChild("PlayerGui"))
             local stack = Instance.new("Frame")
             stack.AnchorPoint = Vector2.new(0.5, 0)
             stack.Position = UDim2.new(0.5, 0, 0, 72)
@@ -19140,14 +20797,7 @@ task.spawn(function()
         task.spawn(function()
             local B = S.bar
             local pg = lp:WaitForChild("PlayerGui")
-            local gui = Instance.new("ScreenGui")
-            gui.Name = "NoVR_Bar"
-            gui.ResetOnSpawn = false
-            gui.IgnoreGuiInset = true
-            pcall(function() gui.ScreenInsets = Enum.ScreenInsets.None end)
-            gui.DisplayOrder = 102   -- above the Start menu (100), under the welcome / loading screens
-            gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-            gui.Parent = pg
+            local gui = S.mkFollow("NoVR_Bar", 102, pg)
             -- if something removes it, put it back so it stays on the screen
             gui.AncestryChanged:Connect(function()
                 if not gui.Parent then task.defer(function() if lp.Parent then gui.Parent = lp:FindFirstChild("PlayerGui") end end) end
@@ -19477,14 +21127,8 @@ task.spawn(function()
 
         -- always-visible button that opens / closes the start menu
         task.spawn(function()
-            local tg = Instance.new("ScreenGui")
-            tg.Name = "NoVR_StartToggle"
-            tg.ResetOnSpawn = false
-            tg.IgnoreGuiInset = true
-            pcall(function() tg.ScreenInsets = Enum.ScreenInsets.None end)
-            tg.DisplayOrder = 101
+            local tg = S.mkFollow("NoVR_StartToggle", 101, lp:WaitForChild("PlayerGui"))
             tg.Enabled = false   -- the compact bar (M button) replaces this round button
-            tg.Parent = lp:WaitForChild("PlayerGui")
 
             local btn = Instance.new("TextButton")
             btn.AnchorPoint = Vector2.new(1, 0)
@@ -19518,7 +21162,14 @@ task.spawn(function()
             end)
         end)
         UIS.InputBegan:Connect(function(io)
-            if io.KeyCode == Enum.KeyCode.Home and not UIS:GetFocusedTextBox() then
+            if UIS:GetFocusedTextBox() then return end
+            if io.KeyCode == Enum.KeyCode.Backquote or io.KeyCode == Enum.KeyCode.Pause then   -- pause menu
+                if hudApi.isPaused() then hudApi.closePause() else hudApi.openPause() end
+                return
+            end
+            if io.KeyCode == Enum.KeyCode.Escape and hudApi.isPaused() then hudApi.closePause() return end
+            local ctrlK = io.KeyCode == Enum.KeyCode.K and (UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.RightControl))
+            if io.KeyCode == Enum.KeyCode.Home or ctrlK then
                 if startGui then closeStart() else openStart() end
             end
         end)
