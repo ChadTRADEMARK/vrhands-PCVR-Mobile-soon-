@@ -69,7 +69,7 @@ local C = ((loadstring or load)(SHIM))()
 -- ====================== UPDATE LINK ======================
 -- Put the RAW link to this script here (GitHub raw, Pastebin raw, your own host...).
 -- The Update button in the Start Menu downloads this link and restarts the script.
-local UPDATE_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR-Mobile-soon-/refs/heads/main/VRHands_Mobile.lua"
+local UPDATE_URL = "https://raw.githubusercontent.com/ChadTRADEMARK/vrhands-PCVR-Mobile-soon-/refs/heads/main/Mobile%20version"
 -- ==========================================================
 
 -- Shown in Start Menu > Profile > STATUS tab. Bump SCRIPT_VERSION whenever you publish a new version.
