@@ -243,12 +243,6 @@ do
     IS_MOBILE = (string.find(p, "Android", 1, true) ~= nil) or (string.find(p, "IOS", 1, true) ~= nil)
         or (UIS.TouchEnabled and not UIS.KeyboardEnabled and not UIS.MouseEnabled)
     if EXEC and EXEC.isDelta and (UIS.TouchEnabled and not UIS.KeyboardEnabled) then IS_MOBILE = true end   -- Delta on a phone
-    pcall(function()   -- the choice from the start menu (Mobile / Computer) overrides the guess
-        if type(isfile) == "function" and type(readfile) == "function" and isfile("NoVR_platform.txt") then
-            local v = readfile("NoVR_platform.txt")
-            if v == "mobile" then IS_MOBILE = true elseif v == "computer" then IS_MOBILE = false end
-        end
-    end)
 end
 
 -- ============ BOOT STATUS ============
@@ -837,6 +831,7 @@ do
         end)
     end
 
+    U.hooked = hooked
     if not hooked then warn("[NoVR] could not hook the game metatable - VR spoof may not work") end
 end
 
@@ -1532,10 +1527,43 @@ task.spawn(function()
         return
     end
     Boot.stage("Waiting for the server to issue your VR rig...")
-    local rig = vrPlayers:WaitForChild(uid, 60)
-    if not rig then
-        Boot.fail("The server did not issue a VR rig for you (60s). Rejoin the game and run the script again.")
-        return
+    local rig = vrPlayers:FindFirstChild(uid)
+    do
+        -- The game hands out the rig when its own scripts see that you are a VR player. If they looked before this script was ready (common on phones,
+        -- where the queued script starts late), the game is asked again: its "VR changed" listeners are fired, a few times, while we wait.
+        local waitMax = IS_MOBILE and 100 or 60
+        local t0, lastNudge, nudges = os.clock(), -10, 0
+        local function nudgeVR()
+            nudges = nudges + 1
+            local gc = (getgenv and getgenv().getconnections) or getconnections
+            local fs = (getgenv and getgenv().firesignal) or firesignal
+            for _, sig in ipairs({ VRService:GetPropertyChangedSignal("VREnabled"), UIS:GetPropertyChangedSignal("VREnabled"), VRService.UserCFrameEnabled }) do
+                if gc then
+                    local okc, cons = pcall(gc, sig)
+                    if okc and type(cons) == "table" then
+                        for _, con in ipairs(cons) do
+                            pcall(function() con:Fire() end)
+                            pcall(function() if con.Function then task.spawn(con.Function) end end)
+                        end
+                    end
+                end
+                if fs then pcall(fs, sig) end
+            end
+        end
+        while not rig and os.clock() - t0 < waitMax do
+            task.wait(0.25)
+            rig = vrPlayers:FindFirstChild(uid)
+            local el = os.clock() - t0
+            if not rig and el - lastNudge >= 5 and el >= 2.5 then
+                lastNudge = el
+                pcall(nudgeVR)
+            end
+            if not rig and math.floor(el) % 5 == 0 then Boot.stage(("Waiting for the server to issue your VR rig... %ds / %ds"):format(math.floor(el), waitMax)) end
+        end
+        if not rig then
+            Boot.fail(("The server did not issue a VR rig for you (%ds). VR checks the script answered: %d (0 = the game asked before the script was ready), hook: %s, re-asks sent: %d. Wait for the automatic rejoin to finish, then run the loader again."):format(waitMax, (U.stat and U.stat.vren) or 0, U.hooked and "ok" or "FAILED", nudges))
+            return
+        end
     end
     Boot.stage(U.emu and "Starting the VR emulator..." or "Loading VR hands...")
     rig:WaitForChild("VRHead", 20)
@@ -5101,7 +5129,6 @@ task.spawn(function()
             if type(d.pop.zoom) == "number" and d.pop.zoom >= 0.6 and d.pop.zoom <= 2.5 then S.pop.zoom = d.pop.zoom end
             if type(d.pop.nosnd) == "boolean" then S.pop.nosnd = d.pop.nosnd end
             if d.pop.perf == "low" or d.pop.perf == "high" then S.pop.perf = d.pop.perf end
-            if d.pop.plat == "mobile" or d.pop.plat == "computer" then S.pop.plat = d.pop.plat IS_MOBILE = (d.pop.plat == "mobile") end
             if type(d.pop.bgOff) == "boolean" then S.pop.bgOff = d.pop.bgOff end
             if type(d.pop.noMusic) == "boolean" then S.pop.noMusic = d.pop.noMusic end
             if type(d.pop.domeSize) == "number" and d.pop.domeSize >= 1 and d.pop.domeSize <= 3 then S.pop.domeSize = math.floor(d.pop.domeSize) end
@@ -12688,6 +12715,7 @@ task.spawn(function()
             local dist = (c.S0 - cf.Position).Magnitude
             local deadline = c.dbrDeadline or 25
             local left = math.max(deadline - (b.t0 + b.liftT), 3)
+            b.d0 = dist
             b.aMax = math.clamp(3.4 * dist / (left * left), 40, 900)   -- strong enough to arrive before the end
             b.maxT = math.max(deadline - b.t0, 3)
             c.dbr = c.dbr or {}
@@ -12751,12 +12779,20 @@ task.spawn(function()
                         local dir = (S0 - pos) / math.max(dB, 1)
                         local tang = A:Cross(dir)
                         tang = tang.Magnitude > 0.05 and tang.Unit or Vector3.zero
-                        local acc = (dir + tang * (0.06 * (1 - k))).Unit * (b.aMax * k * k)   -- almost straight in: only a slight curve at the start
+                        local bhR = c.bhR
+                        local near = dB < bhR * 6
+                        local boost = math.clamp(((b.d0 or dB) / math.max(dB, bhR)) ^ 1.5, 1, 40)   -- gravity gets much stronger as it falls in
+                        local swirl = near and (0.12 + 0.9 * (1 - dB / (bhR * 6))) or 0.04 * (1 - k)   -- it picks up spin only close to the hole, like the accretion disc
+                        local acc = (dir + tang * swirl).Unit * (b.aMax * 0.55 * boost * k * k)
                         local g = b.water and 0 or 70 * (1 - k)
                         v = v + (acc + Vector3.new(0, -g, 0)) * dt
                         v = v * math.exp(-0.25 * (1 - k) * dt)
-                        local side = v - dir * v:Dot(dir)   -- sideways speed is bled off so nothing keeps circling: everything falls into the hole
-                        v = v - side * math.min(1, (0.4 + 3 * k) * dt)
+                        if near then
+                            v = v * math.exp(-0.5 * dt)   -- friction in the disc makes it spiral in instead of flying past
+                        else
+                            local side = v - dir * v:Dot(dir)   -- far away the sideways speed is bled off: it falls straight in, not around the map
+                            v = v - side * math.min(1, (0.4 + 3 * k) * dt)
+                        end
                         if not b.hl and b.dim >= 10 and dB < 2200 and (c.hlN or 0) < (c.prof and c.prof.hl or 24) and not b.water then   -- heated by the fall
                             pcall(function()
                                 local h = Instance.new("Highlight")
@@ -12793,11 +12829,31 @@ task.spawn(function()
                             v = Vector3.new(v.X * 0.7, impact * 0.28, v.Z * 0.7)
                             w = w * 0.65
                             if impact > 22 and b.dim >= 5 then pcall(S.suckPuff, c, np, b.dim, impact, b.col) end
+                            if impact > 34 and b.dim >= 8 and not b.model and (c.chipN or 0) < (S.perfLow() and 30 or 90) then pcall(S.chipSpawn, c, b, np, age0, impact) end
                         end
                     end
                     local rot = b.cf.Rotation
                     if w.Magnitude > 0.01 then rot = rot * CFrame.fromAxisAngle(w.Unit, w.Magnitude * dt) end
                     b.v, b.w = v, w
+                    if not b.water and not b.model and t >= b.liftT then   -- tidal forces: it is stretched toward the hole, thinned, heated and reddened as it nears
+                        local tR = c.bhR * 5
+                        if dB < tR then
+                            local f = math.clamp((tR - dB) / (tR - c.bhR * 0.6), 0, 1)
+                            pcall(function()
+                                b.sz0 = b.sz0 or b.p.Size
+                                b.col0 = b.col0 or b.p.Color
+                                local md = math.max(b.sz0.X, b.sz0.Y, b.sz0.Z)
+                                local sq = 1 - 0.55 * f
+                                b.p.Size = Vector3.new(math.max(b.sz0.X * sq, 0.3), math.max(b.sz0.Y * sq, 0.3), math.min(2000, md * (1 + 6 * f * f)))
+                                rot = rot:Lerp(CFrame.lookAt(Vector3.zero, S0 - np).Rotation, math.min(1, f * 1.5))
+                                if f > 0.35 then
+                                    b.p.Color = b.col0:Lerp(Color3.fromRGB(255, 110, 35), math.clamp((f - 0.35) / 0.65, 0, 1) * 0.9)
+                                    if f > 0.75 then b.p.Material = Enum.Material.Neon end
+                                end
+                            end)
+                        end
+                    end
+                    if b.model and not b.roche and dB < c.bhR * 7 then b.roche = true b.breakAt = age0 end   -- a whole object is torn apart before it arrives
                     local cf
                     if b.water then   -- a blob that wobbles, then stretches along its way
                         local sp = v.Magnitude
@@ -12823,6 +12879,21 @@ task.spawn(function()
                     end
                 end
                 if alive then i = i + 1 else table.remove(list, i) end
+            end
+        end
+        function S.chipSpawn(c, b, np, age0, impact)   -- a hard hit knocks chips off: small pieces fly up and tumble
+            local rnd = c.suckRnd
+            for _ = 1, (S.perfLow() and 2 or 4) do
+                c.chipN = (c.chipN or 0) + 1
+                local sd = math.clamp(b.dim * (0.1 + rnd:NextNumber() * 0.12), 0.8, 8)
+                local q = Instance.new("Part")
+                q.Anchored, q.CanCollide, q.CanTouch, q.CanQuery, q.CastShadow = true, false, false, false, true
+                q.Size = Vector3.new(sd, sd * (0.6 + rnd:NextNumber() * 0.5), sd)
+                q.Color = b.col or Color3.fromRGB(110, 98, 86)
+                q.Material = Enum.Material.Slate
+                q.CFrame = CFrame.new(np + Vector3.new((rnd:NextNumber() - 0.5) * b.dim * 0.5, 1, (rnd:NextNumber() - 0.5) * b.dim * 0.5))
+                q.Parent = c.suckf
+                S.dbrAdd(c, q, false, q.CFrame, Vector3.new((rnd:NextNumber() - 0.5) * impact * 0.7, impact * (0.25 + rnd:NextNumber() * 0.35), (rnd:NextNumber() - 0.5) * impact * 0.7), Vector3.new(rnd:NextNumber() - 0.5, rnd:NextNumber() - 0.5, rnd:NextNumber() - 0.5) * 9, { t0 = c.suckAge or age0, liftT = 1.0 + rnd:NextNumber() * 1.2, rampT = 1.4, gy = np.Y, dim = sd, frag = true })
             end
         end
         function S.suckPuff(c, pos, dim, impact, col)   -- a puff of dust and a knock where something lands
@@ -15680,104 +15751,6 @@ local lt = 1 + rnd:NextNumber() * 1.4
                 end
             end)
         end
-        function S.applyPlatform(mode, fromPicker)   -- Mobile / Computer: controls and menus follow it; it is saved and also read at the very start next time
-            S.pop.plat = mode
-            IS_MOBILE = (mode == "mobile")
-            pcall(function() if writefile then writefile("NoVR_platform.txt", mode) end end)
-            if fromPicker then
-                if mode == "mobile" then
-                    S.pop.flat = true
-                    if S.pop.perf == nil then S.applyDevice("low", true) end   -- phones start light; the device question still follows
-                else
-                    S.pop.flat = false
-                end
-            end
-        end
-        function S.platPick(onDone)   -- the very first thing on the first run: which kind of device is this? (asked before the intro, the menus and the graphics load)
-            S.devShowing = true
-            local acc = Theme.tint(Color3.fromRGB(150, 90, 255))
-            local g = Instance.new("ScreenGui")
-            g.Name = "NoVR_PlatPick"
-            g.ResetOnSpawn = false
-            g.IgnoreGuiInset = true
-            pcall(function() g.ScreenInsets = Enum.ScreenInsets.None end)
-            g.DisplayOrder = 810
-            g.Parent = lp:WaitForChild("PlayerGui")
-            local dim = Instance.new("Frame")
-            dim.Size = UDim2.fromScale(1, 1)
-            dim.BackgroundColor3 = Color3.new(0, 0, 0)
-            dim.BackgroundTransparency = 1
-            dim.BorderSizePixel = 0
-            dim.Active = true
-            dim.Parent = g
-            tw(dim, 0.4, { BackgroundTransparency = 0.2 }, Enum.EasingStyle.Quad)
-            local card = Instance.new("Frame")
-            card.AnchorPoint = Vector2.new(0.5, 0.5)
-            card.Position = UDim2.fromScale(0.5, 0.5)
-            card.Size = UDim2.new(0.94, 0, 0, 330)
-            card.BackgroundColor3 = Color3.fromRGB(21, 14, 38)
-            card.BorderSizePixel = 0
-            card.Parent = dim
-            local cc = Instance.new("UICorner")
-            cc.CornerRadius = UDim.new(0, 16)
-            cc.Parent = card
-            local cs = Instance.new("UISizeConstraint")
-            cs.MaxSize = Vector2.new(640, 340)
-            cs.Parent = card
-            local function label(txt, y, h, size, font, col, parent, x, w)
-                local l = Instance.new("TextLabel")
-                l.Position = UDim2.new(x or 0.04, 0, 0, y)
-                l.Size = UDim2.new(w or 0.92, 0, 0, h)
-                l.BackgroundTransparency = 1
-                l.Text = txt
-                l.TextSize = size
-                l.Font = font
-                l.TextColor3 = col
-                l.TextWrapped = true
-                l.TextXAlignment = Enum.TextXAlignment.Center
-                l.TextYAlignment = Enum.TextYAlignment.Top
-                l.Parent = parent or card
-                return l
-            end
-            label("Phone or computer?", 18, 30, 24, Enum.Font.GothamBold, Color3.fromRGB(255, 255, 255))
-            label("Pick how you play. Phone and tablet executors (Delta, Arceus, Codex...) use touch controls; a computer uses mouse and keyboard. You can change it later in Settings.", 54, 40, 13, Enum.Font.GothamMedium, Color3.fromRGB(190, 175, 225))
-            local function choice(x, title, desc, mode, suggested)
-                local b = Instance.new("TextButton")
-                b.Position = UDim2.new(x, 0, 0, 110)
-                b.Size = UDim2.new(0.45, 0, 0, 190)
-                b.AutoButtonColor = false
-                b.BackgroundColor3 = Color3.fromRGB(44, 28, 84)
-                b.BorderSizePixel = 0
-                b.Text = ""
-                b.Parent = card
-                local bc = Instance.new("UICorner")
-                bc.CornerRadius = UDim.new(0, 14)
-                bc.Parent = b
-                local st = Instance.new("UIStroke")
-                st.Color = acc
-                st.Thickness = suggested and 2.5 or 1
-                st.Transparency = suggested and 0.1 or 0.6
-                st.Parent = b
-                label(title, 14, 28, 18, Enum.Font.GothamBold, Color3.fromRGB(255, 255, 255), b, 0.05, 0.9)
-                label(desc, 50, 100, 12, Enum.Font.GothamMedium, Color3.fromRGB(205, 195, 235), b, 0.06, 0.88)
-                if suggested then label("Suggested for this device", 160, 20, 11, Enum.Font.GothamBold, acc, b, 0.05, 0.9) end
-                b.MouseEnter:Connect(function() tw(b, 0.15, { BackgroundColor3 = Color3.fromRGB(62, 40, 112) }, Enum.EasingStyle.Quad) end)
-                b.MouseLeave:Connect(function() tw(b, 0.15, { BackgroundColor3 = Color3.fromRGB(44, 28, 84) }, Enum.EasingStyle.Quad) end)
-                b.Activated:Connect(function()
-                    if g.Parent == nil then return end
-                    S.applyPlatform(mode, true)
-                    if S.softPop then pcall(S.softPop, 1.1, 0.7, 0.07) end
-                    tw(dim, 0.3, { BackgroundTransparency = 1 }, Enum.EasingStyle.Quad)
-                    task.delay(0.32, function()
-                        pcall(function() g:Destroy() end)
-                        S.devShowing = false
-                        if onDone then pcall(onDone) end
-                    end)
-                end)
-            end
-            choice(0.035, "Mobile", "Phones and tablets (Delta, Arceus X, Codex...).\n\nOn-screen touch controls, flat menus and a lighter start.", "mobile", IS_MOBILE)
-            choice(0.515, "Computer", "Windows and Mac.\n\nMouse and keyboard controls and the 3D menus.", "computer", not IS_MOBILE)
-        end
         function S.devicePick(onDone)   -- the very first thing on the first run: which kind of device is this? (asked before the intro, the menus and the graphics load)
             S.devShowing = true
             local acc = Theme.tint(Color3.fromRGB(150, 90, 255))
@@ -16035,11 +16008,6 @@ local lt = 1 + rnd:NextNumber() * 1.4
         local function openStart()
             if startGui then return end
             if S.tutShowing or S.devShowing then return end
-            if S.pop.plat == nil and S.platPick and not (EXEC and EXEC.isfile and EXEC.isfile("NoVR_platform.txt")) then   -- first: phone or computer
-                local okp = pcall(S.platPick, function() openStart() end)
-                if okp then return end
-                S.devShowing = false
-            end
             if S.pop.perf == nil and S.devicePick then   -- then: the device question
                 local okd = pcall(S.devicePick, function() openStart() end)
                 if okd then return end
@@ -17435,9 +17403,7 @@ local lt = 1 + rnd:NextNumber() * 1.4
                 end
                 swRow(1550, "High-end device", "Off = Low-end: lighter dome intro (fewer objects and effects)", function() return not S.perfLow() end,
                     function(v) S.applyDevice(v and "high" or "low", false) end)
-                swRow(1604, "Mobile controls", "On = touch layout for phones and tablets. Off = Computer. Fully applies after restarting the script.", function() return IS_MOBILE end,
-                    function(v) S.applyPlatform(v and "mobile" or "computer", false) end)
-                btn2(20, 1658, "RESET POSITIONS", function()
+                btn2(20, 1604, "RESET POSITIONS", function()
                     for _, e in ipairs(me.panels) do
                         if e.moveTo and e.homeX and not e.noShadow then
                             e.moveTo(e.homeX, e.homeY)
@@ -17448,8 +17414,8 @@ local lt = 1 + rnd:NextNumber() * 1.4
                     S.bar.x, S.bar.y, S.bar.mx, S.bar.my = 0.5, 0.93, nil, nil
                     if hudApi.barApply then hudApi.barApply() end
                 end)
-                btn2(180, 1658, "SHOW POP-UPS", function() if hudApi.showPopups then task.spawn(hudApi.showPopups, true) end end)
-                local note2 = lbl(p, "Menus can't leave the Roblox window. Dragging is smoothed and clamped at the edges.", 20, 1704, 310, 28, 10, MUTED, Enum.Font.GothamMedium)
+                btn2(180, 1604, "SHOW POP-UPS", function() if hudApi.showPopups then task.spawn(hudApi.showPopups, true) end end)
+                local note2 = lbl(p, "Menus can't leave the Roblox window. Dragging is smoothed and clamped at the edges.", 20, 1650, 310, 28, 10, MUTED, Enum.Font.GothamMedium)
                 note2.TextWrapped = true
                 note2.TextTruncate = Enum.TextTruncate.None
                 ent.scrollify(50)
