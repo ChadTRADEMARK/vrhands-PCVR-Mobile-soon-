@@ -1550,10 +1550,98 @@ task.spawn(function()
                 if fs then pcall(fs, sig) end
             end
         end
+        -- ===== when the server stays silent: write a report, restart the game's own VR scripts, and knock on its VR remotes =====
+        local SKIPN = { "playermodule", "rbxcharactersounds", "chatscript", "bubblechat", "playerscriptsloader", "animate", "health", "controlscript", "camerascript" }
+        local function clientScripts()
+            local out = {}
+            local roots = {}
+            for _, r in ipairs({ 1, 2, 3, 4, 5 }) do
+                local x = (r == 1 and lp:FindFirstChild("PlayerScripts")) or (r == 2 and lp:FindFirstChild("PlayerGui")) or (r == 3 and game:GetService("ReplicatedFirst")) or (r == 4 and game:GetService("StarterPlayer")) or (r == 5 and lp.Character) or nil
+                if x then roots[#roots + 1] = x end
+            end
+            for _, r in ipairs(roots) do
+                if r then
+                    local okd, list = pcall(function() return r:GetDescendants() end)
+                    if okd then
+                        for _, d in ipairs(list) do
+                            if d:IsA("LocalScript") and string.sub(d.Name, 1, 4) ~= "NoVR" then
+                                local ln, skip = string.lower(d.Name), false
+                                for _, k in ipairs(SKIPN) do if ln == k then skip = true break end end
+                                if not skip then out[#out + 1] = d end
+                            end
+                        end
+                    end
+                end
+            end
+            return out
+        end
+        local function restartScript(d)   -- switching a LocalScript off and on makes it run again from the top
+            pcall(function() d.Enabled = false end)
+            pcall(function() d.Disabled = true end)
+            task.wait(0.15)
+            pcall(function() d.Enabled = true end)
+            pcall(function() d.Disabled = false end)
+        end
+        local function report()
+            local L = { "VR Hands rig report", "executor: " .. tostring(EXEC.name) .. "  delta: " .. tostring(EXEC.isDelta), "mobile: " .. tostring(IS_MOBILE) }
+            pcall(function() L[#L + 1] = "platform: " .. tostring(UIS:GetPlatform()) .. "  touch: " .. tostring(UIS.TouchEnabled) .. "  keyboard: " .. tostring(UIS.KeyboardEnabled) .. "  VREnabled(as the game sees it): " .. tostring(UIS.VREnabled) end)
+            L[#L + 1] = "hook ok: " .. tostring(U.hooked) .. "  VREnabled reads answered: " .. tostring((U.stat and U.stat.vren) or 0)
+            pcall(function() L[#L + 1] = "queue_on_teleport: " .. tostring(EXEC.queue ~= nil) .. "  placeId: " .. tostring(game.PlaceId) .. "  seconds since join: " .. tostring(math.floor(workspace.DistributedGameTime)) end)
+            pcall(function()
+                local ch = {}
+                for _, c in ipairs(vrPlayers:GetChildren()) do ch[#ch + 1] = c.Name end
+                L[#L + 1] = "workspace.VRPlayers children: " .. table.concat(ch, ", ") .. "   (your id: " .. uid .. ")"
+            end)
+            L[#L + 1] = "--- client scripts ---"
+            for _, d in ipairs(clientScripts()) do L[#L + 1] = d.ClassName .. " " .. d:GetFullName() end
+            L[#L + 1] = "--- remotes ---"
+            pcall(function()
+                for _, d in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
+                    if d:IsA("RemoteEvent") or d:IsA("RemoteFunction") then L[#L + 1] = d.ClassName .. " " .. d:GetFullName() end
+                end
+            end)
+            local txt = table.concat(L, "\n")
+            pcall(function() if writefile then writefile("NoVR_rig_diag.txt", txt) end end)
+            pcall(function() local sc = (getgenv and getgenv().setclipboard) or setclipboard if sc then sc(txt) end end)
+            print(txt)
+        end
+        local function restartVRScripts(all)
+            local n = 0
+            for _, d in ipairs(clientScripts()) do
+                local ln = string.lower(d:GetFullName())
+                if all or string.find(ln, "vr", 1, true) then
+                    n = n + 1
+                    if n <= 12 then task.spawn(restartScript, d) end
+                end
+            end
+            return n
+        end
+        local function knockRemotes()   -- the game's own VR-related remotes, harmless names only
+            local BADN = { "kick", "ban", "report", "admin", "purchase", "buy", "teleport", "damage", "kill", "shoot", "hit", "chat", "message", "trade", "gift", "donat", "robux", "vote", "grab", "throw" }
+            local n = 0
+            for _, d in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
+                if (d:IsA("RemoteEvent")) and n < 8 then
+                    local ln = string.lower(d.Name)
+                    local bad = false
+                    for _, k in ipairs(BADN) do if string.find(ln, k, 1, true) then bad = true break end end
+                    if not bad and (string.find(ln, "vr", 1, true) or string.find(ln, "ready", 1, true) or string.find(ln, "loaded", 1, true)) then
+                        n = n + 1
+                        pcall(function() d:FireServer() end)
+                        pcall(function() d:FireServer(true) end)
+                    end
+                end
+            end
+            return n
+        end
+        local did = {}
         while not rig and os.clock() - t0 < waitMax do
             task.wait(0.25)
             rig = vrPlayers:FindFirstChild(uid)
             local el = os.clock() - t0
+            if not rig and el >= 8 and not did.rep then did.rep = true pcall(report) end
+            if not rig and el >= 14 and not did.vr then did.vr = true pcall(restartVRScripts, false) end
+            if not rig and el >= 28 and not did.rem then did.rem = true pcall(knockRemotes) end
+            if not rig and el >= 55 and not did.all then did.all = true pcall(restartVRScripts, true) end
             if not rig and el - lastNudge >= 5 and el >= 2.5 then
                 lastNudge = el
                 pcall(nudgeVR)
@@ -1561,7 +1649,7 @@ task.spawn(function()
             if not rig and math.floor(el) % 5 == 0 then Boot.stage(("Waiting for the server to issue your VR rig... %ds / %ds"):format(math.floor(el), waitMax)) end
         end
         if not rig then
-            Boot.fail(("The server did not issue a VR rig for you (%ds). VR checks the script answered: %d (0 = the game asked before the script was ready), hook: %s, re-asks sent: %d. Wait for the automatic rejoin to finish, then run the loader again."):format(waitMax, (U.stat and U.stat.vren) or 0, U.hooked and "ok" or "FAILED", nudges))
+            Boot.fail(("The server did not issue a VR rig for you (%ds). VR checks the script answered: %d (0 = the game asked before the script was ready), hook: %s, re-asks sent: %d. A full report was copied to your clipboard and saved as NoVR_rig_diag.txt: paste it to the script author. Wait for the automatic rejoin to finish, then run the loader again."):format(waitMax, (U.stat and U.stat.vren) or 0, U.hooked and "ok" or "FAILED", nudges))
             return
         end
     end
